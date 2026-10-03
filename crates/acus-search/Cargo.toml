@@ -1,0 +1,19 @@
+[package]
+name = "acus-search"
+description = "Regex search with enclosing-symbol context for acus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+acus-syntax.workspace = true
+acus-walk.workspace = true
+anyhow.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+acus-syntax = { workspace = true, features = ["lang-rust"] }
+tempfile.workspace = true
