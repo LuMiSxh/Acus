@@ -23,12 +23,20 @@ pub struct Args {
     /// Lines around a location outside any known symbol.
     #[arg(long, default_value_t = 3)]
     context: usize,
+    /// Keep build noise (cargo/swift progress lines, passing tests, empty test runs).
+    #[arg(long)]
+    raw: bool,
 }
 
 /// Runs a command, prints its output, then the code its `path:line` references point at.
 /// Exit: the command's exit code (2 if it could not start).
 pub fn run(a: Args, out: &Out) -> Result<Outcome> {
-    let cmd = format!("{} 2>&1", a.command);
+    // The redirect must cover the whole command line, not just its last `&&` part.
+    let cmd = if cfg!(windows) {
+        format!("({}) 2>&1", a.command)
+    } else {
+        format!("exec 2>&1\n{}", a.command)
+    };
     let res = if cfg!(windows) {
         Command::new("cmd").args(["/C", &cmd]).output()
     } else {
@@ -52,7 +60,9 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         );
         return Ok(Outcome::Exit(code.clamp(0, 255) as u8));
     }
-    let lines: Vec<&str> = text.lines().collect();
+    let all: Vec<&str> = text.lines().collect();
+    let (lines, passed) = if a.raw { (all.clone(), 0) } else { quiet(&all) };
+    let dropped = all.len() - lines.len();
     let half = a.max_output.max(2) / 2;
     if lines.len() > half * 2 {
         lines[..half].iter().for_each(|l| println!("{l}"));
@@ -62,6 +72,19 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
             .for_each(|l| println!("{l}"));
     } else {
         lines.iter().for_each(|l| println!("{l}"));
+    }
+    if dropped > 0 {
+        let tests = if passed > 0 {
+            format!("; {passed} tests passed")
+        } else {
+            String::new()
+        };
+        println!(
+            "{}",
+            out.dim(&format!(
+                "… {dropped} build-noise lines dropped{tests} (--raw keeps them)"
+            ))
+        );
     }
     println!("{}", out.header(&format!("== exit {code}")));
     for (p, l) in refs.iter().take(a.max_refs) {
@@ -81,6 +104,74 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         );
     }
     Ok(Outcome::Exit(code.clamp(0, 255) as u8))
+}
+
+/// Drops progress and success lines that only cost tokens: cargo `Compiling`/`Checking`/…,
+/// SwiftPM `[n/m]` steps, passing tests, green `test result` lines (returned as a pass count)
+/// and repeated blank lines.
+fn quiet<'a>(lines: &[&'a str]) -> (Vec<&'a str>, usize) {
+    const CARGO: &[&str] = &[
+        "Compiling ",
+        "Checking ",
+        "Downloaded ",
+        "Downloading ",
+        "Fresh ",
+        "Blocking ",
+        "Updating ",
+        "Locking ",
+        "Adding ",
+        "Finished ",
+        "Running ",
+        "Doc-tests ",
+        "Documenting ",
+    ];
+    const SWIFT: &[&str] = &[
+        "Compiling",
+        "Emitting",
+        "Linking",
+        "Write",
+        "Build",
+        "Planning",
+        "Applying",
+    ];
+    let swift_step = |t: &str| {
+        t.strip_prefix('[')
+            .and_then(|t| t.split_once("] "))
+            .and_then(|(n, rest)| n.split_once('/').map(|(a, b)| (a, b, rest)))
+            .is_some_and(|(a, b, rest)| {
+                a.parse::<u32>().is_ok()
+                    && b.parse::<u32>().is_ok()
+                    && SWIFT.iter().any(|w| rest.starts_with(w))
+            })
+    };
+    // Cargo indents its status words; requiring that keeps program output like "Running x" intact.
+    let noise = |l: &str| {
+        let t = l.trim_start();
+        CARGO
+            .iter()
+            .any(|p| t.starts_with(p) && l.len() - t.len() >= 2)
+            || (t.starts_with("test ") && t.ends_with(" ... ok"))
+            || (t.starts_with("running ") && (t.ends_with(" tests") || t.ends_with(" test")))
+            || (!t.is_empty() && t.bytes().all(|b| b == b'.'))
+            || swift_step(t)
+    };
+    let mut passed = 0;
+    let mut v: Vec<&str> = Vec::new();
+    for l in lines.iter().copied().filter(|l| !noise(l)) {
+        if let Some(r) = l.trim_start().strip_prefix("test result: ok. ") {
+            passed += r
+                .split(' ')
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        if l.trim().is_empty() && v.last().is_none_or(|p| p.trim().is_empty()) {
+            continue;
+        }
+        v.push(l);
+    }
+    (v, passed)
 }
 
 /// `path:line` references to files under `cwd`, first occurrence order, one per enclosing
@@ -188,7 +279,28 @@ fn snippet(path: &Path, line: usize, a: &Args) -> Option<(String, usize, Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use super::candidates;
+    use super::{candidates, quiet};
+
+    #[test]
+    fn drops_build_noise_but_keeps_failures() {
+        let out = "   Compiling foo v0.1.0 (/x)\n    Finished `test` profile\n     Running unittests src/lib.rs\n\nrunning 2 tests\ntest a ... ok\ntest b ... FAILED\n\n\nfailures:\ntest result: FAILED. 1 passed; 1 failed\n\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed\n[3/9] Compiling Foo Bar.swift\nerror: x\nRunning is a word";
+        let l: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            quiet(&l),
+            (
+                vec![
+                    "test b ... FAILED",
+                    "",
+                    "failures:",
+                    "test result: FAILED. 1 passed; 1 failed",
+                    "",
+                    "error: x",
+                    "Running is a word"
+                ],
+                0
+            )
+        );
+    }
 
     #[test]
     fn finds_compiler_and_runtime_references() {

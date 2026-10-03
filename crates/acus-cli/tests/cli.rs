@@ -224,7 +224,7 @@ fn ctx_shows_code_behind_output_references() {
     std::fs::write(d.path().join("a.rs"), "fn f() {\n    boom()\n}\n").unwrap();
     let (code, out, _) = acus_in(
         d.path(),
-        &["ctx", "echo 'panicked at a.rs:2:5' && exit 3"],
+        &["ctx", "echo 'panicked at a.rs:2:5' >&2 && exit 3"],
         "",
     );
     assert_eq!(code, 3);

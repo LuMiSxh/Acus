@@ -64,6 +64,35 @@ fn anchor_may_be_the_first_context_line_or_part_of_a_line() {
 }
 
 #[test]
+fn context_errors_point_at_the_near_miss() {
+    let d = dir(&[(
+        "a.rs",
+        "/// Long doc line, cut short.\nfn a() {\n    x();\n}\n",
+    )]);
+    let err = |p: &str| {
+        run(
+            d.path(),
+            &format!("*** Begin Patch\n*** Update File: a.rs\n{p}*** End Patch\n"),
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert!(err(" /// Long doc line\n+fn b() {}\n").contains("line 1 only starts with it"));
+    assert!(err(" fn a() {\n-    y();\n").contains("line 3 is `    x();`, not `    y();`"));
+}
+
+#[test]
+fn hunk_may_start_just_above_its_anchor() {
+    let d = dir(&[("a.rs", "/// Old.\nfn a() {}\n")]);
+    run(
+        d.path(),
+        "*** Begin Patch\n*** Update File: a.rs\n@@ fn a\n-/// Old.\n+/// New.\n fn a() {}\n*** End Patch\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "/// New.\nfn a() {}\n");
+}
+
+#[test]
 fn ambiguous_context_is_rejected_and_nothing_written() {
     let d = dir(&[("a.rs", "x\ny\nx\n"), ("b.rs", "keep\n")]);
     let err = run(

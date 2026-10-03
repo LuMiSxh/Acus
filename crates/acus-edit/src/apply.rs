@@ -324,7 +324,21 @@ fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
             after
         })
     } else {
-        locate(lines, &c.old, from, c.eof)
+        // Hunks often edit the doc comment or attributes just above their `@@ fn …` anchor.
+        locate(lines, &c.old, from, c.eof).or_else(|e| {
+            let back = from.saturating_sub(c.old.len());
+            if back < from {
+                locate(
+                    &lines[..from + c.old.len().min(lines.len() - from)],
+                    &c.old,
+                    back,
+                    c.eof,
+                )
+                .map_err(|_| e)
+            } else {
+                Err(e)
+            }
+        })
     }
 }
 
@@ -348,10 +362,44 @@ fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<us
             }
         }
     }
-    let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&old[0]);
+    let j = old.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+    let first = old[j].trim();
     bail!(
-        "context not found, first expected line `{first}`\nhint: re-read the file (acus show) and retry"
+        "context not found, first expected line `{first}`\n{}",
+        near_miss(lines, old, j)
     )
+}
+
+/// Why the closest candidate failed, so the agent can fix the hunk without re-reading the file.
+fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
+    let first = old[j].trim();
+    for i in (j..lines.len()).filter(|&i| lines[i].trim() == first) {
+        let start = i - j;
+        if let Some(k) = (0..old.len()).find(|&k| {
+            lines
+                .get(start + k)
+                .is_none_or(|l| l.trim() != old[k].trim())
+        }) {
+            let found = lines.get(start + k).map_or("end of file", |l| l.as_str());
+            return format!(
+                "hint: the first line matches at {}, but line {} is `{found}`, not `{}`",
+                i + 1,
+                start + k + 1,
+                old[k]
+            );
+        }
+    }
+    if let Some(i) = lines
+        .iter()
+        .position(|l| !first.is_empty() && l.trim().starts_with(first))
+    {
+        return format!(
+            "hint: line {} only starts with it; context and `-` lines must be whole lines: `{}`",
+            i + 1,
+            lines[i].trim()
+        );
+    }
+    "hint: re-read the file (acus show) and retry".into()
 }
 
 /// Writes every dirty file to a temp file next to it, then renames them all into place.
