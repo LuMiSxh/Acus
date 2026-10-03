@@ -51,6 +51,21 @@ impl fmt::Display for Change {
     }
 }
 
+/// Lines a patch wrote, as they read afterwards (`start` is 1-based).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    pub path: String,
+    pub start: usize,
+    pub lines: Vec<String>,
+}
+
+/// What `apply` did: one summary per op plus the edited regions of updated files.
+#[derive(Debug, Default)]
+pub struct Applied {
+    pub changes: Vec<Change>,
+    pub regions: Vec<Region>,
+}
+
 /// A file as the patch sees it; `lines: None` means deleted or not existing.
 struct File {
     lines: Option<Vec<String>>,
@@ -59,6 +74,23 @@ struct File {
     perms: Option<Permissions>,
     existed: bool,
     dirty: bool,
+    /// Edited (0-based start, length) ranges in the current `lines`.
+    edits: Vec<(usize, usize)>,
+}
+
+impl File {
+    /// Splices `new` over `at..at + old` and keeps earlier edit ranges pointing at their lines.
+    fn splice(&mut self, at: usize, old: usize, new: &[String]) {
+        let lines = self.lines.as_mut().expect("splice on a missing file");
+        lines.splice(at..at + old, new.iter().cloned());
+        self.edits.retain(|&(s, _)| s < at || s >= at + old);
+        for (s, _) in &mut self.edits {
+            if *s >= at + old {
+                *s = *s + new.len() - old;
+            }
+        }
+        self.edits.push((at, new.len()));
+    }
 }
 
 struct Files<'a> {
@@ -93,6 +125,7 @@ impl Files<'_> {
                         perms: fs::metadata(&full).ok().map(|m| m.permissions()),
                         existed: true,
                         dirty: false,
+                        edits: Vec::new(),
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => File {
@@ -102,6 +135,7 @@ impl Files<'_> {
                     perms: None,
                     existed: false,
                     dirty: false,
+                    edits: Vec::new(),
                 },
                 Err(e) => return Err(e).with_context(|| format!("{path}: cannot read")),
             };
@@ -120,7 +154,7 @@ impl Files<'_> {
 
 /// Validates and applies every op in memory, then writes all files atomically.
 /// With `check`, stops before writing. Relative paths resolve against `root`.
-pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Vec<Change>> {
+pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     let mut files = Files {
         root,
         map: BTreeMap::new(),
@@ -129,10 +163,25 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Vec<Change>> {
     for op in ops {
         changes.push(apply_op(&mut files, op)?);
     }
+    let mut regions = Vec::new();
+    for (path, f) in &files.map {
+        let (Some(lines), true) = (&f.lines, f.existed) else {
+            continue;
+        };
+        let mut edits = f.edits.clone();
+        edits.sort_unstable();
+        for (s, n) in edits.into_iter().filter(|&(_, n)| n > 0) {
+            regions.push(Region {
+                path: path.clone(),
+                start: s + 1,
+                lines: lines[s..s + n].to_vec(),
+            });
+        }
+    }
     if !check {
         commit(root, files.map)?;
     }
-    Ok(changes)
+    Ok(Applied { changes, regions })
 }
 
 fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
@@ -164,9 +213,12 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
             move_to,
             chunks,
         } => {
-            let lines = files.lines(path)?;
+            files.lines(path)?;
+            let f = files.get(path)?;
             for (i, c) in chunks.iter().enumerate() {
-                apply_chunk(lines, c).map_err(|e| anyhow!("{path}: hunk {}: {e}", i + 1))?;
+                let at = locate_chunk(f.lines.as_ref().unwrap(), c)
+                    .map_err(|e| anyhow!("{path}: hunk {}: {e}", i + 1))?;
+                f.splice(at, c.old.len(), &c.new);
             }
             let (added, removed) = chunks
                 .iter()
@@ -180,11 +232,12 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
                 },
                 Some(to) => {
                     let src = files.get(path)?;
-                    let (lines, crlf, trailing, perms) = (
+                    let (lines, crlf, trailing, perms, edits) = (
                         src.lines.take(),
                         src.crlf,
                         src.trailing_newline,
                         src.perms.clone(),
+                        std::mem::take(&mut src.edits),
                     );
                     let dst = files.get(to)?;
                     if dst.lines.is_some() {
@@ -197,6 +250,7 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
                         perms,
                         existed: dst.existed,
                         dirty: true,
+                        edits,
                     };
                     Change::Moved {
                         from: path.clone(),
@@ -229,8 +283,9 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
                     bail!("{path}: `{symbol}` is ambiguous\nhint: {}", c.join(", "))
                 }
             };
-            lines.splice(start - 1..end, body.iter().cloned());
-            files.get(path)?.dirty = true;
+            let f = files.get(path)?;
+            f.splice(start - 1, end - start + 1, body);
+            f.dirty = true;
             Change::Modified {
                 path: path.clone(),
                 added: body.len(),
@@ -248,7 +303,8 @@ const PASSES: [Eq; 3] = [
     |a, b| a.trim() == b.trim(),
 ];
 
-fn apply_chunk(lines: &mut Vec<String>, c: &Chunk) -> Result<()> {
+/// Where `c.old` sits in `lines` (insertion point for pure additions).
+fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
     let mut from = 0;
     for a in &c.anchors {
         // Anchors may also be a line's start (`@@ fn parse` for `    fn parse(&self) {`).
@@ -258,17 +314,15 @@ fn apply_chunk(lines: &mut Vec<String>, c: &Chunk) -> Result<()> {
             .find_map(|eq| (from..lines.len()).find(|&i| eq(&lines[i], a)));
         from = found.ok_or_else(|| anyhow!("`@@ {a}` not found"))? + 1;
     }
-    let at = if c.old.is_empty() {
-        if c.eof || c.anchors.is_empty() {
+    if c.old.is_empty() {
+        Ok(if c.eof || c.anchors.is_empty() {
             lines.len()
         } else {
             from
-        }
+        })
     } else {
-        locate(lines, &c.old, from, c.eof)?
-    };
-    lines.splice(at..at + c.old.len(), c.new.iter().cloned());
-    Ok(())
+        locate(lines, &c.old, from, c.eof)
+    }
 }
 
 fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<usize> {

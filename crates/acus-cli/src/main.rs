@@ -1,3 +1,4 @@
+mod cmd_ctx;
 mod cmd_decide;
 mod cmd_find;
 mod cmd_outline;
@@ -44,6 +45,8 @@ enum Cmd {
     Usage(cmd_usage::Args),
     /// Yes/no, choice or score judgement via a Jev-compatible API (needs `cmd-decide`).
     Decide(cmd_decide::Args),
+    /// Run a shell command; print its output plus the code its `path:line` references point at.
+    Ctx(cmd_ctx::Args),
     /// Run several commands from a JSON array of argument lists on stdin.
     Run(cmd_run::Args),
 }
@@ -58,6 +61,7 @@ impl Cmd {
             Cmd::Usage(_) => "usage",
             Cmd::Decide(_) => "decide",
             Cmd::Run(_) => "run",
+            Cmd::Ctx(_) => "ctx",
         }
     }
 }
@@ -65,6 +69,8 @@ impl Cmd {
 pub enum Outcome {
     Found,
     Empty,
+    /// Pass through a child command's exit code.
+    Exit(u8),
 }
 
 impl Cli {
@@ -97,6 +103,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Decide(a) => cmd_decide::run(a, &out, &cfg),
         Cmd::Run(_) if nested => bail!("`run` cannot be nested"),
         Cmd::Run(a) => cmd_run::run(a, &out),
+        Cmd::Ctx(a) => cmd_ctx::run(a, &out),
     }
 }
 
@@ -104,6 +111,7 @@ fn main() -> ExitCode {
     match execute(Cli::parse(), false) {
         Ok(Outcome::Found) => ExitCode::SUCCESS,
         Ok(Outcome::Empty) => ExitCode::from(1),
+        Ok(Outcome::Exit(c)) => ExitCode::from(c),
         Err(e) => {
             // Messages carry an optional second line `hint: …`.
             eprintln!("error: {e:#}");

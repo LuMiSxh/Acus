@@ -1,6 +1,6 @@
 ---
 name: acus
-description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, or editing several places or files at once — i.e. whenever about to run grep, rg, find, cat, head, tail or sed -n, or to Read a file just to look something up.
+description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, editing several places or files at once, or running a build or tests and inspecting the failing code — i.e. whenever about to run grep, rg, find, cat, head, tail or sed -n, or to Read a file just to look something up.
 ---
 
 # acus
@@ -17,6 +17,7 @@ One call answers what usually takes search → read → read. Output is line-num
 | A symbol, line range or file | `acus show src/a.rs#Parser::parse src/b.rs:40-80 README.md` |
 | Several independent lookups | `echo '[["find","X"],["show","a.rs#f"]]' \| acus run` |
 | Edit files or replace a symbol | `acus patch` with the patch on stdin |
+| Run tests/build and see the failing code | `acus ctx 'cargo test -q'` |
 
 ## Patch
 
@@ -40,7 +41,7 @@ acus patch <<'EOF'
 EOF
 ```
 
-All or nothing: on error nothing was written, so fix that hunk and resend the whole patch. `--check` validates only.
+Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written, so fix that hunk and resend the whole patch. `--check` validates only.
 
 ## Reading the output
 

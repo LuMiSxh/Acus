@@ -61,13 +61,14 @@ pub fn outline(lang: Lang, src: &str) -> Option<Outline> {
 }
 
 fn parse(lang: Lang, src: &str, ranges: &[tree_sitter::Range]) -> Option<Tree> {
-    // ponytail: a fresh parser per file; keep one per thread if profiling shows allocation cost.
-    let mut p = Parser::new();
-    p.set_language(&lang.grammar()?).ok()?;
-    if !ranges.is_empty() {
+    // One parser per thread: its internal buffers are reused across files.
+    thread_local!(static PARSER: std::cell::RefCell<Parser> = std::cell::RefCell::new(Parser::new()));
+    PARSER.with_borrow_mut(|p| {
+        p.set_language(&lang.grammar()?).ok()?;
+        // An empty slice resets to the whole document.
         p.set_included_ranges(ranges).ok()?;
-    }
-    p.parse(src, None)
+        p.parse(src, None)
+    })
 }
 
 /// Parses every `<script>` body of a Svelte file as TypeScript, keeping file positions.

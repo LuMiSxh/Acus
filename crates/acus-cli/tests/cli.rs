@@ -141,11 +141,11 @@ fn patch_from_stdin() {
         acus_in(d.path(), &["patch", "--check"], p),
         (
             0,
-            "M a.rs +1 -1\n(check only, nothing written)\n".into(),
+            "M a.rs +1 -1\n== a.rs 2-2\n2\t    2\n(check only, nothing written)\n".into(),
             String::new()
         )
     );
-    assert_eq!(acus_in(d.path(), &["patch"], p).1, "M a.rs +1 -1\n");
+    assert_eq!(acus_in(d.path(), &["patch", "-q"], p).1, "M a.rs +1 -1\n");
     assert_eq!(
         std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
         "fn f() {\n    2\n}\n"
@@ -208,5 +208,21 @@ fn run_batch() {
             0,
             "[{\"address\":\"src/lib.rs\",\"end\":1,\"start\":1,\"text\":\"pub struct Parser {\"}]\n"
         )
+    );
+}
+
+#[test]
+fn ctx_shows_code_behind_output_references() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.rs"), "fn f() {\n    boom()\n}\n").unwrap();
+    let (code, out, _) = acus_in(
+        d.path(),
+        &["ctx", "echo 'panicked at a.rs:2:5' && exit 3"],
+        "",
+    );
+    assert_eq!(code, 3);
+    assert!(
+        out.contains("== exit 3\n== a.rs#f (line 2)\n1\tfn f() {\n2>\t    boom()\n"),
+        "{out}"
     );
 }

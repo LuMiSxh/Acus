@@ -13,7 +13,7 @@ fn dir(files: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 fn run(root: &Path, patch: &str) -> anyhow::Result<Vec<Change>> {
-    apply(&parse(patch)?, root, false)
+    Ok(apply(&parse(patch)?, root, false)?.changes)
 }
 
 fn read(root: &Path, p: &str) -> String {
@@ -162,5 +162,20 @@ fn keeps_permissions() {
     assert_eq!(
         fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o755
+    );
+}
+
+#[test]
+fn reports_written_regions_with_final_line_numbers() {
+    let d = dir(&[("a.txt", "1\n2\n3\n4\n5\n6\n")]);
+    // Second hunk sits above the first one; its insertion shifts the first region down.
+    let p = "*** Begin Patch\n*** Update File: a.txt\n@@ 4\n-5\n+five\n+FIVE\n*** Update File: a.txt\n@@ 1\n+one-and-a-half\n*** End Patch\n";
+    let r = apply(&parse(p).unwrap(), d.path(), true).unwrap().regions;
+    let got: Vec<_> = r.iter().map(|r| (r.start, r.lines.join(","))).collect();
+    assert_eq!(got, [(2, "one-and-a-half".into()), (6, "five,FIVE".into())]);
+    assert_eq!(
+        read(d.path(), "a.txt"),
+        "1\n2\n3\n4\n5\n6\n",
+        "check wrote nothing"
     );
 }

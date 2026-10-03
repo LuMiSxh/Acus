@@ -17,7 +17,8 @@ cargo install --path crates/acus-cli
 | `acus find PATTERN [PATH…]` | Regex search, hits grouped by enclosing symbol; `--block` prints symbol bodies |
 | `acus outline PATH…` | Symbols with kinds and line ranges |
 | `acus show ADDR…` | Print symbols, line ranges or files with line numbers |
-| `acus patch [--check] [-f FILE]` | Apply a patch from stdin: all-or-nothing, atomic writes, no temp files left behind |
+| `acus patch [--check] [-q] [-f FILE]` | Apply a patch from stdin: all-or-nothing, atomic writes; prints the written lines with their new numbers |
+| `acus ctx 'COMMAND'` | Run a build/test command; print its output plus the code each `path:line` in it points at |
 | `acus usage [--days N] [--project P]` | Token, cost and tool-call analytics over Claude Code / Codex transcripts |
 | `acus decide QUESTION` | Yes/no, choice or score judgement via a Jev-compatible API (opt-in feature) |
 | `acus run` | Several commands in one invocation (JSON array of argument lists on stdin) |
@@ -33,6 +34,7 @@ acus find "fn parse" -g '*.rs' --block   # hits plus enclosing function bodies
 acus outline src --depth 1               # top-level symbols of every file
 acus show src/lib.rs#Parser::parse README.md#Usage src/main.rs:10-40
 echo '[["outline","src"],["find","TODO"]]' | acus run
+acus ctx 'cargo test -q'                 # failures plus the functions they point at
 acus usage --days 7
 ```
 

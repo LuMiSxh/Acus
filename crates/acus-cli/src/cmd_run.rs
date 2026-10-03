@@ -31,7 +31,9 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
             .and_then(|cli| execute(cli, true));
         std::io::stdout().flush().ok();
         match res {
-            Ok(Outcome::Found) => found = true,
+            Ok(Outcome::Found | Outcome::Exit(0)) => found = true,
+            // A `ctx` command that failed counts as a failed entry.
+            Ok(Outcome::Exit(_)) => failed = true,
             Ok(Outcome::Empty) => {
                 if out.format != Format::Json {
                     println!("(no results)");
