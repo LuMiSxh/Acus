@@ -305,20 +305,23 @@ const PASSES: [Eq; 3] = [
 
 /// Where `c.old` sits in `lines` (insertion point for pure additions).
 fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
-    let mut from = 0;
+    // `from` stays on the anchor line itself: agents often repeat it as the first context line.
+    let (mut from, mut after) = (0, 0);
     for a in &c.anchors {
-        // Anchors may also be a line's start (`@@ fn parse` for `    fn parse(&self) {`).
+        // Anchors may also be part of a line (`@@ fn parse` for `    pub fn parse(&self) {`).
         let found = PASSES
             .iter()
             .chain([&((|l, a| l.trim_start().starts_with(a.trim())) as Eq)])
-            .find_map(|eq| (from..lines.len()).find(|&i| eq(&lines[i], a)));
-        from = found.ok_or_else(|| anyhow!("`@@ {a}` not found"))? + 1;
+            .chain([&((|l, a| l.contains(a.trim())) as Eq)])
+            .find_map(|eq| (after..lines.len()).find(|&i| eq(&lines[i], a)));
+        from = found.ok_or_else(|| anyhow!("`@@ {a}` not found"))?;
+        after = from + 1;
     }
     if c.old.is_empty() {
         Ok(if c.eof || c.anchors.is_empty() {
             lines.len()
         } else {
-            from
+            after
         })
     } else {
         locate(lines, &c.old, from, c.eof)

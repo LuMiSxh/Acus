@@ -47,6 +47,23 @@ fn update_with_anchor_and_context() {
 }
 
 #[test]
+fn anchor_may_be_the_first_context_line_or_part_of_a_line() {
+    let d = dir(&[(
+        "a.rs",
+        "const A: u8 = 1;\nconst B: u8 = 2;\n\npub fn solve() {\n    go(1);\n}\n",
+    )]);
+    run(
+        d.path(),
+        "*** Begin Patch\n*** Update File: a.rs\n@@ const B\n const B: u8 = 2;\n+const C: u8 = 3;\n@@ fn solve\n-    go(1);\n+    go(2);\n*** End Patch\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "const A: u8 = 1;\nconst B: u8 = 2;\nconst C: u8 = 3;\n\npub fn solve() {\n    go(2);\n}\n"
+    );
+}
+
+#[test]
 fn ambiguous_context_is_rejected_and_nothing_written() {
     let d = dir(&[("a.rs", "x\ny\nx\n"), ("b.rs", "keep\n")]);
     let err = run(
