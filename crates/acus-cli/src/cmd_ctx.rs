@@ -1,11 +1,14 @@
 use crate::Outcome;
+use crate::config::Config;
 use crate::fmt::{Format, Out};
 use acus_syntax::{Lang, outline};
 use acus_walk::display_path;
 use anyhow::{Context, Result};
+use regex::{Regex, RegexSet};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -23,14 +26,23 @@ pub struct Args {
     /// Lines around a location outside any known symbol.
     #[arg(long, default_value_t = 3)]
     context: usize,
-    /// Keep build noise (cargo/swift progress lines, passing tests, empty test runs).
+    /// Keep build noise (progress lines, passing tests, colour codes, repeated lines).
     #[arg(long)]
     raw: bool,
+    /// Also drop output lines matching this regex (repeatable), e.g. --drop '^warning: unused'.
+    #[arg(long, value_name = "REGEX")]
+    drop: Vec<String>,
 }
 
 /// Runs a command, prints its output, then the code its `path:line` references point at.
 /// Exit: the command's exit code (2 if it could not start).
-pub fn run(a: Args, out: &Out) -> Result<Outcome> {
+pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
+    let extra = RegexSet::new(cfg.ctx.drop.iter().chain(&a.drop)).with_context(|| {
+        format!(
+            "invalid --drop or [ctx] drop regex ({})",
+            cfg.path.display()
+        )
+    })?;
     // The redirect must cover the whole command line, not just its last `&&` part.
     let cmd = if cfg!(windows) {
         format!("({}) 2>&1", a.command)
@@ -43,7 +55,8 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         Command::new("sh").args(["-c", &cmd]).output()
     }
     .with_context(|| format!("cannot run `{}`", a.command))?;
-    let text = String::from_utf8_lossy(&res.stdout);
+    let raw = String::from_utf8_lossy(&res.stdout);
+    let text = if a.raw { raw.to_string() } else { clean(&raw) };
     let code = res.status.code().unwrap_or(1);
     let cwd = std::env::current_dir()?;
     let refs = refs(&text, &cwd);
@@ -61,8 +74,11 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         return Ok(Outcome::Exit(code.clamp(0, 255) as u8));
     }
     let all: Vec<&str> = text.lines().collect();
-    let (lines, passed) = if a.raw { (all.clone(), 0) } else { quiet(&all) };
-    let dropped = all.len() - lines.len();
+    let (lines, passed, dropped) = if a.raw {
+        (all.iter().map(|l| l.to_string()).collect(), 0, 0)
+    } else {
+        quiet(&all, &extra)
+    };
     let half = a.max_output.max(2) / 2;
     if lines.len() > half * 2 {
         lines[..half].iter().for_each(|l| println!("{l}"));
@@ -82,7 +98,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         println!(
             "{}",
             out.dim(&format!(
-                "… {dropped} build-noise lines dropped{tests} (--raw keeps them)"
+                "… {dropped} noise lines dropped{tests} (--raw keeps them)"
             ))
         );
     }
@@ -109,55 +125,82 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
 /// Drops progress and success lines that only cost tokens: cargo `Compiling`/`Checking`/…,
 /// SwiftPM `[n/m]` steps, passing tests, green `test result` lines (returned as a pass count)
 /// and repeated blank lines.
-fn quiet<'a>(lines: &[&'a str]) -> (Vec<&'a str>, usize) {
-    const CARGO: &[&str] = &[
-        "Compiling ",
-        "Checking ",
-        "Downloaded ",
-        "Downloading ",
-        "Fresh ",
-        "Blocking ",
-        "Updating ",
-        "Locking ",
-        "Adding ",
-        "Finished ",
-        "Running ",
-        "Doc-tests ",
-        "Documenting ",
-    ];
-    const SWIFT: &[&str] = &[
-        "Compiling",
-        "Emitting",
-        "Linking",
-        "Write",
-        "Build",
-        "Planning",
-        "Applying",
-    ];
-    let swift_step = |t: &str| {
-        t.strip_prefix('[')
-            .and_then(|t| t.split_once("] "))
-            .and_then(|(n, rest)| n.split_once('/').map(|(a, b)| (a, b, rest)))
-            .is_some_and(|(a, b, rest)| {
-                a.parse::<u32>().is_ok()
-                    && b.parse::<u32>().is_ok()
-                    && SWIFT.iter().any(|w| rest.starts_with(w))
-            })
-    };
-    // Cargo indents its status words; requiring that keeps program output like "Running x" intact.
-    let noise = |l: &str| {
-        let t = l.trim_start();
-        CARGO
-            .iter()
-            .any(|p| t.starts_with(p) && l.len() - t.len() >= 2)
-            || (t.starts_with("test ") && t.ends_with(" ... ok"))
-            || (t.starts_with("running ") && (t.ends_with(" tests") || t.ends_with(" test")))
-            || (!t.is_empty() && t.bytes().all(|b| b == b'.'))
-            || swift_step(t)
-    };
+/// Progress, status and passing-test lines of common toolchains. Anchored and specific, so
+/// program output and failures stay; `[ctx] drop` in the config adds more.
+const NOISE: &[&str] = &[
+    // cargo indents its status words; requiring that keeps program output like "Running x".
+    r"^\s{2,}(Compiling|Checking|Downloaded|Downloading|Fresh|Blocking|Updating|Locking|Adding|Removing|Finished|Running|Doc-tests|Documenting|Packaging|Verifying|Installing|Installed|Replacing|Replaced) ",
+    r"^test .* \.\.\. ok$",
+    r"^running \d+ tests?$",
+    // Dot progress (cargo -q, pytest -q) without failures.
+    r"^[.s]+\s*(\[\s*\d+%\])?$",
+    r"^\S+\.py [.s]+\s*(\[\s*\d+%\])?$",
+    // SwiftPM, ninja, cmake.
+    r"^\[\d+/\d+\] (Compiling|Emitting|Linking|Write|Build|Planning|Applying|Building|Generating|Copying)",
+    r"^\[\s*\d+%\] (Building|Linking|Built target|Generating)",
+    r"^make(\[\d+\])?: (Entering|Leaving|Nothing to be done)",
+    // xcodebuild steps and the command lines under them.
+    r"^(CompileC|CompileSwift|CompileSwiftSources|SwiftCompile|SwiftDriver|SwiftDriverJobDiscovery|SwiftEmitModule|SwiftMergeGeneratedHeaders|EmitSwiftModule|Ld|Libtool|ProcessInfoPlistFile|CodeSign|CpResource|CopySwiftLibs|ProcessProductPackaging|ProcessProductPackagingDER|GenerateDSYMFile|Touch|RegisterExecutionPolicyException|RegisterWithLaunchServices|Validate|ValidateEmbeddedBinary|WriteAuxiliaryFile|MkDir|CreateBuildDirectory|PhaseScriptExecution|ExtractAppIntentsMetadata|AppIntentsSSUTraining|ClangStatCache|LinkAssetCatalog|CompileAssetCatalog|CompileAssetCatalogVariant|GenerateAssetSymbols|CopyPlistFile|SymLink|ComputeTargetDependencyGraph|ComputePackagePrebuildTargetDependencyGraph|CreateUniversalBinary|Copy|Ditto|ScanDependencies|PrecompileModule|SwiftExplicitDependencyCompileModuleFromInterface|SwiftExplicitDependencyGeneratePcm|ProcessXCFramework|CompileStoryboard|CompileXIB|LinkStoryboards|GenerateTAPI|Strip|SetMode|SetOwnerAndGroup) ",
+    r"^    (cd |export |builtin-|/Applications/Xcode|/usr/bin/|/Library/Developer/)",
+    r"^(Prepare packages|Resolve Package Graph|Resolved source packages:|Command line invocation:|Build settings from command line:|User defaults from command line:|Writing result bundle at path:|Computing target dependency graph and provisioning inputs|Create build description|Build description path:|note: Building targets in dependency order|note: Run script build phase|note: Target dependency graph)",
+    r"^Test (Case|Suite) '.*' (passed|started)",
+    // swift-testing: "✔ Test foo() passed after 0.001 seconds."
+    r"^\S{1,2} (Test|Suite) .*(started\.|passed after [\d.]+ seconds\.)$",
+    // vitest / jest / mocha / node:test.
+    r"^\s*[✓✔√] ",
+    r"^ ?PASS ",
+    r"^ok \d+ - ",
+    // pytest headers and -v passes.
+    r"^=+ test session starts =+$",
+    r"^(platform \S+ -- Python|rootdir: |plugins: |cachedir: |configfile: |testpaths: |collecting \.\.\.|collected \d+ items?)",
+    r"^\S+::\S+ PASSED",
+    // go test -v.
+    r"^ok  \t",
+    r"^=== (RUN|PAUSE|CONT|NAME) ",
+    r"^\s*--- PASS: ",
+    r"^PASS$",
+    // npm, pnpm, yarn, bun.
+    r"^> \S+@\S+ \S+",
+    r"^(Progress: resolved|Packages: [+-]|Done in [\d.]+m?s|Already up to date|Lockfile is up to date|Scope: all \d+ workspace|Resolving: total|Downloading: total|\$ \S+ \S+ \S+|added \d+ packages?|up to date, audited|found 0 vulnerabilities|\d+ packages? (are|is) looking for funding|  run `npm fund`)",
+    r"^[+-]{2,}$",
+    // pip, uv, poetry.
+    r"^(Requirement already satisfied: |Collecting |  Downloading \S+|  Using cached |Using cached |Installing collected packages: |(Resolved|Prepared|Installed|Audited|Uninstalled|Built) \d+ packages? in )",
+    // gradle.
+    r"^> Task :\S+( UP-TO-DATE| NO-SOURCE| FROM-CACHE| SKIPPED)?$",
+    // svelte-check, mix.
+    r"^(Loading svelte-check|Getting Svelte diagnostics|====================================)",
+    r"^(==> \S+$|Compiling \d+ files? \(\.\w+\)$|Generated \S+ app$)",
+];
+
+static NOISE_SET: LazyLock<RegexSet> = LazyLock::new(|| RegexSet::new(NOISE).unwrap());
+
+/// The output as a terminal would show it: no colour codes, and only the final state of lines
+/// a progress bar redrew with `\r`.
+fn clean(text: &str) -> String {
+    static ANSI: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[()][0-9A-B])").unwrap()
+    });
+    ANSI.replace_all(text, "")
+        .lines()
+        .map(|l| l.rsplit('\r').find(|s| !s.is_empty()).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Drops noise lines, blank runs and repeats; returns kept lines, passed tests and the dropped count.
+fn quiet(lines: &[&str], extra: &RegexSet) -> (Vec<String>, usize, usize) {
     let mut passed = 0;
-    let mut v: Vec<&str> = Vec::new();
-    for l in lines.iter().copied().filter(|l| !noise(l)) {
+    let mut v: Vec<String> = Vec::new();
+    let mut repeat = 0;
+    let flush = |v: &mut Vec<String>, repeat: &mut usize| {
+        if *repeat > 0 {
+            let last = v.last_mut().unwrap();
+            *last = format!("{last} (×{})", *repeat + 1);
+            *repeat = 0;
+        }
+    };
+    let noise = |l: &str| NOISE_SET.is_match(l) || extra.is_match(l);
+    for &l in lines.iter().filter(|l| !noise(l)) {
         if let Some(r) = l.trim_start().strip_prefix("test result: ok. ") {
             passed += r
                 .split(' ')
@@ -169,9 +212,16 @@ fn quiet<'a>(lines: &[&'a str]) -> (Vec<&'a str>, usize) {
         if l.trim().is_empty() && v.last().is_none_or(|p| p.trim().is_empty()) {
             continue;
         }
-        v.push(l);
+        if !l.trim().is_empty() && v.last().is_some_and(|p| p == l) {
+            repeat += 1;
+            continue;
+        }
+        flush(&mut v, &mut repeat);
+        v.push(l.to_string());
     }
-    (v, passed)
+    flush(&mut v, &mut repeat);
+    let dropped = lines.len() - v.len();
+    (v, passed, dropped)
 }
 
 /// `path:line` references to files under `cwd`, first occurrence order, one per enclosing
@@ -279,26 +329,47 @@ fn snippet(path: &Path, line: usize, a: &Args) -> Option<(String, usize, Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{candidates, quiet};
+    use super::{candidates, clean, quiet};
+    use regex::RegexSet;
 
     #[test]
     fn drops_build_noise_but_keeps_failures() {
         let out = "   Compiling foo v0.1.0 (/x)\n    Finished `test` profile\n     Running unittests src/lib.rs\n\nrunning 2 tests\ntest a ... ok\ntest b ... FAILED\n\n\nfailures:\ntest result: FAILED. 1 passed; 1 failed\n\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed\n[3/9] Compiling Foo Bar.swift\nerror: x\nRunning is a word";
         let l: Vec<&str> = out.lines().collect();
+        let (v, passed, dropped) = quiet(&l, &RegexSet::empty());
+        assert_eq!((passed, dropped), (0, 10));
         assert_eq!(
-            quiet(&l),
-            (
-                vec![
-                    "test b ... FAILED",
-                    "",
-                    "failures:",
-                    "test result: FAILED. 1 passed; 1 failed",
-                    "",
-                    "error: x",
-                    "Running is a word"
-                ],
-                0
-            )
+            v,
+            [
+                "test b ... FAILED",
+                "",
+                "failures:",
+                "test result: FAILED. 1 passed; 1 failed",
+                "",
+                "error: x",
+                "Running is a word"
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_noise_of_other_toolchains() {
+        let out = "\x1b[32m ✓ src/a.test.ts (3 tests)\x1b[0m\n \x1b[31m× src/b.test.ts > fails\x1b[0m\n=== RUN   TestX\n--- PASS: TestX (0.00s)\n--- FAIL: TestY (0.00s)\nok  \tpkg/a\t0.1s\nCompileSwift normal arm64 /x/A.swift\n    cd /x\n/x/A.swift:3:1: error: nope\nTest Case '-[T a]' passed (0.001 seconds).\nTest Case '-[T b]' failed (0.001 seconds).\n============================= test session starts ==============================\nplatform darwin -- Python 3.13.0\ncollected 4 items\n\ntests/test_a.py ..F.  [100%]\ntests/test_b.py ....  [100%]\nwarn: x\nwarn: x\nwarn: x\ncustom noise 1\n> app@1.0.0 build\nProgress: resolved 1, reused 1\rProgress: resolved 9, reused 9\ndone";
+        let text = clean(out);
+        let l: Vec<&str> = text.lines().collect();
+        let (v, _, _) = quiet(&l, &RegexSet::new(["^custom noise"]).unwrap());
+        assert_eq!(
+            v,
+            [
+                " × src/b.test.ts > fails",
+                "--- FAIL: TestY (0.00s)",
+                "/x/A.swift:3:1: error: nope",
+                "Test Case '-[T b]' failed (0.001 seconds).",
+                "",
+                "tests/test_a.py ..F.  [100%]",
+                "warn: x (×3)",
+                "done"
+            ]
         );
     }
 

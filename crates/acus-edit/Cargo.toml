@@ -8,7 +8,9 @@ license.workspace = true
 
 [dependencies]
 acus-syntax.workspace = true
+acus-walk.workspace = true
 anyhow.workspace = true
+regex.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

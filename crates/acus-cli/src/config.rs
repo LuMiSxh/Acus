@@ -11,6 +11,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub commands: Commands,
     pub decide: Decide,
+    pub ctx: Ctx,
     #[serde(skip)]
     pub path: PathBuf,
 }
@@ -20,6 +21,13 @@ pub struct Config {
 pub struct Commands {
     /// Command names that refuse to run, e.g. `["usage"]`.
     pub disabled: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ctx {
+    /// Extra regexes; `acus ctx` drops output lines matching any of them.
+    pub drop: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]

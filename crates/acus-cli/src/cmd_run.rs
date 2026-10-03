@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 #[derive(clap::Args)]
 pub struct Args {}
 
-/// Reads `[["find","x"],["show","a.rs#f"]]` from stdin and runs each entry in order.
+/// Reads one command per line (`find x --block`, shell-style quotes, `#` comments) or
+/// `[["find","x"],["show","a.rs#f"]]` from stdin and runs each entry in order.
 /// Agent/human output separates entries with `>>> acus …` lines; JSON output is one
 /// line per entry. Exit: 2 if any entry failed, else 0 if any found something.
 pub fn run(_: Args, out: &Out) -> Result<Outcome> {
@@ -15,8 +16,17 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
     std::io::stdin()
         .read_to_string(&mut s)
         .context("cannot read stdin")?;
-    let batch: Vec<Vec<String>> = serde_json::from_str(&s)
-        .context("expected a JSON array of argument arrays\nhint: [[\"find\",\"needle\"],[\"show\",\"src/a.rs#f\"]]")?;
+    let batch: Vec<Vec<String>> = if s.trim_start().starts_with('[') {
+        serde_json::from_str(&s)
+            .context("expected a JSON array of argument arrays\nhint: [[\"find\",\"needle\"],[\"show\",\"src/a.rs#f\"]]")?
+    } else {
+        s.lines()
+            .map(split)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|a| !a.is_empty())
+            .collect()
+    };
     let (mut found, mut failed) = (false, false);
     for args in batch {
         let mut argv = vec!["acus".to_owned()];
@@ -58,4 +68,63 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
     } else {
         Outcome::Empty
     })
+}
+
+/// Splits a command line like a shell would for plain words and '…'/"…" quotes; drops a
+/// leading `acus` and `#` comments. Backslashes are literal outside double quotes (Windows paths).
+fn split(line: &str) -> Result<Vec<String>> {
+    let (mut args, mut cur, mut word) = (Vec::new(), String::new(), false);
+    let mut chars = line.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '#' if !word => break,
+            c if c.is_whitespace() => {
+                if word {
+                    args.push(std::mem::take(&mut cur));
+                    word = false;
+                }
+            }
+            '\'' | '"' => {
+                word = true;
+                loop {
+                    match chars.next() {
+                        Some(q) if q == c => break,
+                        Some('\\') if c == '"' => cur.extend(chars.next()),
+                        Some(x) => cur.push(x),
+                        None => anyhow::bail!("unclosed {c} in `{line}`"),
+                    }
+                }
+            }
+            c => {
+                word = true;
+                cur.push(c);
+            }
+        }
+    }
+    if word {
+        args.push(cur);
+    }
+    if args.first().is_some_and(|a| a == "acus") {
+        args.remove(0);
+    }
+    Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn splits_command_lines() {
+        let s = |l| super::split(l).unwrap();
+        assert_eq!(
+            s("acus find 'fn (a|b)' --block # why"),
+            ["find", "fn (a|b)", "--block"]
+        );
+        assert_eq!(
+            s(r#"show "a b.rs#f" src\x.rs"#),
+            ["show", "a b.rs#f", r"src\x.rs"]
+        );
+        assert_eq!(s("show a.rs#f"), ["show", "a.rs#f"]);
+        assert!(s("  # only a comment").is_empty());
+        assert!(super::split("find 'x").is_err());
+    }
 }

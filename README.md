@@ -52,9 +52,9 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
-| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise and passing tests, and shows the code behind every `path:line` in its output |
+| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes and passing tests, and shows the code behind every `path:line` in its output |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
-| `acus run` | Several of the above in one process (JSON list of argument lists on stdin) |
+| `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API |
 
@@ -87,6 +87,33 @@ Symbols are understood for Rust, Swift, TypeScript and JavaScript, Svelte, Pytho
 ```
 
 Context lines are matched exactly first, then without trailing whitespace, then without any surrounding whitespace. An `@@` anchor can be any part of a line, and the context may start on the anchor line itself. If a hunk matches in more than one place, the patch is refused and the error lists the candidate lines.
+
+Agents that would otherwise write a `sed -i` line or a small Python script get a few more directives:
+
+```
+*** Update File: src/lib.rs
+<<<<<<< SEARCH
+    let x = 1;
+=======
+    let x = 2;
+>>>>>>> REPLACE
+*** Replace All: src *.py
+<<<<<<< SEARCH
+old_name(
+=======
+new_name(
+>>>>>>> REPLACE
+<<<<<<< REGEX
+fn (\w+)_old\(
+=======
+fn ${1}_new(
+>>>>>>> REPLACE
+*** Delete Symbol: src/lib.rs#unused
+*** Move Symbol: src/lib.rs#helper
+*** After: src/util.rs#main
+```
+
+SEARCH/REPLACE blocks are the format Aider made popular and can stand in for `-`/`+` lines inside any `Update File`. `Replace All` changes every occurrence in the given files, directories and globs, and fails if a block matches nowhere. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
 
 Nothing is written unless every hunk applies. Files are replaced atomically. `--check` only validates.
 
@@ -123,6 +150,9 @@ Criterion benchmarks for the core paths live in `crates/acus-cli/benches`.
 [commands]
 disabled = ["usage"]
 
+[ctx]
+drop = ["^warning: unused"]                         # extra output lines acus ctx hides
+
 [decide]
 enabled = true
 url = "https://openrouter.ai/api/alpha/decisions"   # or https://api.typesafe.ai/v1/systemone
@@ -130,7 +160,7 @@ model = "~typesafe/jev-latest"                      # "jev-latest" when talking 
 api_key_env = "OPENROUTER_API_KEY"                  # TYPESAFE_API_KEY when talking to TypeSafe directly
 ```
 
-The same settings can come from the environment: `ACUS_DISABLE=usage,decide`, `ACUS_DECIDE_ENABLED`, `ACUS_DECIDE_URL`, `ACUS_DECIDE_MODEL` and `ACUS_DECIDE_API_KEY_ENV`.
+`acus ctx --drop REGEX` does the same for a single run. The other settings can also come from the environment: `ACUS_DISABLE=usage,decide`, `ACUS_DECIDE_ENABLED`, `ACUS_DECIDE_URL`, `ACUS_DECIDE_MODEL` and `ACUS_DECIDE_API_KEY_ENV`.
 
 Language support is compiled in through the features `lang-rust`, `lang-swift`, `lang-ts`, `lang-python`, `lang-markdown`, `lang-svelte` and `lang-data`, all on by default. Leave some out for a smaller binary.
 

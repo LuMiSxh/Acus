@@ -17,6 +17,7 @@ dependencies = [
  "clap",
  "criterion",
  "insta",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -37,7 +38,9 @@ name = "acus-edit"
 version = "0.1.0"
 dependencies = [
  "acus-syntax",
+ "acus-walk",
  "anyhow",
+ "regex",
  "tempfile",
 ]
 

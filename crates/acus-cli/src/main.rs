@@ -40,7 +40,8 @@ enum Cmd {
     Outline(cmd_outline::Args),
     /// Print files, line ranges or symbols with line numbers.
     Show(cmd_show::Args),
-    /// Apply a patch from stdin (Codex apply_patch format + `*** Replace Symbol: path#Sym`).
+    /// Apply a patch from stdin (Codex apply_patch format, SEARCH/REPLACE blocks, `*** Replace Symbol:`,
+    /// `*** Delete Symbol:`, `*** Move Symbol:` and `*** Replace All:`).
     Patch(cmd_patch::Args),
     /// Token, cost and tool-call analytics over Claude Code and Codex transcripts.
     Usage(cmd_usage::Args),
@@ -107,7 +108,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Decide(a) => cmd_decide::run(a, &out, &cfg),
         Cmd::Run(_) if nested => bail!("`run` cannot be nested"),
         Cmd::Run(a) => cmd_run::run(a, &out),
-        Cmd::Ctx(a) => cmd_ctx::run(a, &out),
+        Cmd::Ctx(a) => cmd_ctx::run(a, &out, &cfg),
         Cmd::Diff(a) => cmd_diff::run(a, &out),
     }
 }

@@ -225,3 +225,138 @@ fn reports_written_regions_with_final_line_numbers() {
         "check wrote nothing"
     );
 }
+
+#[test]
+fn search_replace_blocks_inside_update() {
+    let d = dir(&[(
+        "a.rs",
+        "fn one() {\n    a();\n    b();\n}\n\nfn two() {\n    a();\n}\n",
+    )]);
+    let c = run(
+        d.path(),
+        "*** Update File: a.rs\n@@ fn two\n<<<<<<< SEARCH\n    a();\n=======\n    z();\n>>>>>>> REPLACE\n<<<<<<<\n    a();\n    b();\n=======\n    b();\n>>>>>>>\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "fn one() {\n    b();\n}\n\nfn two() {\n    z();\n}\n"
+    );
+    assert_eq!(c[0].to_string(), "M a.rs +1 -2");
+}
+
+#[test]
+fn replace_all_literal_and_regex_across_files() {
+    let d = dir(&[
+        ("src/a.rs", "use old::X;\nfn f() { old::y(); }\n"),
+        ("src/b.rs", "let v = old::z;\n"),
+        ("c.txt", "old::keep\n"),
+    ]);
+    let c = run(
+        d.path(),
+        "*** Replace All: src\n<<<<<<< SEARCH\nold::\n=======\nnew::\n>>>>>>> REPLACE\n<<<<<<< REGEX\nfn (\\w+)\\(\\)\n=======\nfn ${1}_v2()\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "src/a.rs"),
+        "use new::X;\nfn f_v2() { new::y(); }\n"
+    );
+    assert_eq!(read(d.path(), "src/b.rs"), "let v = new::z;\n");
+    assert_eq!(read(d.path(), "c.txt"), "old::keep\n");
+    let s: Vec<_> = c.iter().map(ToString::to_string).collect();
+    assert_eq!(s, ["M src/a.rs +2 -2", "M src/b.rs +1 -1"]);
+
+    let e = run(
+        d.path(),
+        "*** Replace All: src/a.rs\n<<<<<<< SEARCH\nmissing\n=======\nx\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("`missing` matches nothing in src/a.rs"), "{e}");
+}
+
+#[test]
+fn replace_all_multiline_and_globs() {
+    let d = dir(&[
+        ("a.py", "x = 1\nif a:\n    go()\n\nif a:\n    go()\n"),
+        ("b.rs", "if a:\n    go()\n"),
+    ]);
+    run(
+        d.path(),
+        "*** Replace All: *.py\n<<<<<<< SEARCH\nif a:\n    go()\n=======\ngo_if(a)\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.py"), "x = 1\ngo_if(a)\n\ngo_if(a)\n");
+    assert_eq!(read(d.path(), "b.rs"), "if a:\n    go()\n");
+}
+
+#[test]
+fn delete_symbol_takes_docs_and_one_blank() {
+    let d = dir(&[(
+        "a.rs",
+        "fn one() {}\n\n/// Two.\n#[inline]\nfn two() {\n    x();\n}\n\nfn three() {}\n",
+    )]);
+    let c = run(d.path(), "*** Delete Symbol: a.rs#two\n").unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "fn one() {}\n\nfn three() {}\n");
+    assert_eq!(c[0].to_string(), "M a.rs +0 -5");
+}
+
+#[test]
+fn move_symbol_within_and_across_files() {
+    let d = dir(&[
+        (
+            "a.rs",
+            "fn one() {}\n\n/// Two.\nfn two() {}\n\nfn three() {}\n",
+        ),
+        ("b.rs", "fn b() {}\n"),
+    ]);
+    run(
+        d.path(),
+        "*** Move Symbol: a.rs#three\n*** Before: a.rs#one\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "fn three() {}\n\nfn one() {}\n\n/// Two.\nfn two() {}\n"
+    );
+    let c = run(
+        d.path(),
+        "*** Move Symbol: a.rs#two\n*** To: b.rs\n*** Move Symbol: a.rs#one\n*** To: c.rs\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "fn three() {}\n");
+    assert_eq!(
+        read(d.path(), "b.rs"),
+        "fn b() {}\n\n/// Two.\nfn two() {}\n"
+    );
+    assert_eq!(read(d.path(), "c.rs"), "fn one() {}\n");
+    let s: Vec<_> = c.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        s,
+        ["M a.rs +0 -2", "M b.rs +2 -0", "M a.rs +0 -1", "A c.rs +1"]
+    );
+    run(d.path(), "*** Move Symbol: b.rs#b\n*** After: b.rs#two\n").unwrap();
+    assert_eq!(
+        read(d.path(), "b.rs"),
+        "/// Two.\nfn two() {}\n\nfn b() {}\n"
+    );
+    assert!(
+        parse("*** Move Symbol: a.rs#x\n")
+            .unwrap_err()
+            .to_string()
+            .contains("needs a destination")
+    );
+}
+
+#[test]
+fn replacement_may_contain_example_blocks() {
+    let d = dir(&[("a.md", "# Docs\nTODO\n")]);
+    run(
+        d.path(),
+        "*** Update File: a.md\n<<<<<<< SEARCH\nTODO\n=======\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.md"),
+        "# Docs\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+    );
+}

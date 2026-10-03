@@ -1,11 +1,14 @@
+use crate::parse::{Block, Dest};
 use crate::{Chunk, Op};
 use acus_syntax::{Lang, Resolve, outline, resolve};
 use anyhow::{Context, Result, anyhow, bail};
+use regex::{Captures, Regex};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, Permissions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// One line of the summary printed after a patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +164,7 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     };
     let mut changes = Vec::new();
     for op in ops {
-        changes.push(apply_op(&mut files, op)?);
+        changes.extend(apply_op(&mut files, op)?);
     }
     let mut regions = Vec::new();
     for (path, f) in &files.map {
@@ -184,8 +187,8 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     Ok(Applied { changes, regions })
 }
 
-fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
-    Ok(match op {
+fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
+    Ok(vec![match op {
         Op::Add { path, lines } => {
             let f = files.get(path)?;
             if f.lines.is_some() {
@@ -266,33 +269,315 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Change> {
             symbol,
             lines: body,
         } => {
-            let lines = files.lines(path)?;
-            let src = lines.join("\n");
-            let Some(o) = Lang::from_path(Path::new(path)).and_then(|l| outline(l, &src)) else {
-                bail!(
-                    "{path}: no syntax support\nhint: use `*** Update File: {path}` with context lines"
-                );
-            };
-            let (start, end) = match resolve(&o, symbol) {
-                Resolve::Found(s) => (s.start_line, s.end_line),
-                Resolve::Missing => {
-                    bail!("{path}: no symbol `{symbol}`\nhint: acus outline {path}")
-                }
-                Resolve::Ambiguous(v) => {
-                    let c: Vec<_> = v.iter().map(|s| format!("{path}#{}", s.qual)).collect();
-                    bail!("{path}: `{symbol}` is ambiguous\nhint: {}", c.join(", "))
-                }
-            };
+            let (start, end) = symbol_lines(files, path, symbol)?;
             let f = files.get(path)?;
-            f.splice(start - 1, end - start + 1, body);
+            f.splice(start, end - start, body);
             f.dirty = true;
             Change::Modified {
                 path: path.clone(),
                 added: body.len(),
-                removed: end - start + 1,
+                removed: end - start,
             }
         }
+        Op::DeleteSymbol { path, symbol } => {
+            let (start, end) = symbol_lines(files, path, symbol)?;
+            let lines = files.lines(path)?;
+            let (start, end) = with_attached(lines, path, start, end);
+            let (s, e) = with_blank(lines, start, end);
+            let f = files.get(path)?;
+            f.splice(s, e - s, &[]);
+            f.dirty = true;
+            Change::Modified {
+                path: path.clone(),
+                added: 0,
+                removed: end - start,
+            }
+        }
+        Op::MoveSymbol { path, symbol, to } => {
+            return move_symbol(files, path, symbol, to.as_ref().unwrap());
+        }
+        Op::ReplaceAll { paths, blocks } => return replace_all(files, paths, blocks),
+    }])
+}
+
+/// 0-based, end-exclusive line range of `path#symbol`.
+fn symbol_lines(files: &mut Files, path: &str, symbol: &str) -> Result<(usize, usize)> {
+    let src = files.lines(path)?.join("\n");
+    let Some(o) = Lang::from_path(Path::new(path)).and_then(|l| outline(l, &src)) else {
+        bail!("{path}: no syntax support\nhint: use `*** Update File: {path}` with context lines");
+    };
+    match resolve(&o, symbol) {
+        Resolve::Found(s) => Ok((s.start_line - 1, s.end_line)),
+        Resolve::Missing => bail!("{path}: no symbol `{symbol}`\nhint: acus outline {path}"),
+        Resolve::Ambiguous(v) => {
+            let c: Vec<_> = v.iter().map(|s| format!("{path}#{}", s.qual)).collect();
+            bail!("{path}: `{symbol}` is ambiguous\nhint: {}", c.join(", "))
+        }
+    }
+}
+
+/// Grows a symbol's range upwards over the doc comments, attributes and decorators that belong to it.
+fn with_attached(lines: &[String], path: &str, mut start: usize, end: usize) -> (usize, usize) {
+    let hash = matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("py" | "toml" | "yaml" | "yml" | "sh")
+    );
+    let markdown = path.ends_with(".md");
+    while !markdown && start > 0 {
+        let l = lines[start - 1].trim_start();
+        let attached = ["///", "//", "#[", "#![", "@", "/*", "*"]
+            .iter()
+            .any(|p| l.starts_with(p))
+            || (hash && l.starts_with('#'));
+        if !attached {
+            break;
+        }
+        start -= 1;
+    }
+    (start, end)
+}
+
+/// Adds one blank line next to a removed range so no double gap remains.
+fn with_blank(lines: &[String], start: usize, end: usize) -> (usize, usize) {
+    let blank = |i: usize| lines.get(i).is_some_and(|l| l.trim().is_empty());
+    if blank(end) && (start == 0 || blank(start - 1) || end + 1 < lines.len()) {
+        (start, end + 1)
+    } else if start > 0 && blank(start - 1) {
+        (start - 1, end)
+    } else {
+        (start, end)
+    }
+}
+
+fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result<Vec<Change>> {
+    let (start, end) = symbol_lines(files, path, symbol)?;
+    let (start, end) = with_attached(files.lines(path)?, path, start, end);
+    let lines = files.lines(path)?;
+    let block = lines[start..end].to_vec();
+    let (s, e) = with_blank(lines, start, end);
+    let f = files.get(path)?;
+    f.splice(s, e - s, &[]);
+    f.dirty = true;
+    let dest = match to {
+        Dest::Before { path, .. } | Dest::After { path, .. } | Dest::End { path } => path,
+    };
+    let mut created = false;
+    let at = match to {
+        Dest::Before { path, symbol } => {
+            let (s, e) = symbol_lines(files, path, symbol)?;
+            let s = with_attached(files.lines(path)?, path, s, e).0;
+            let mut ins = block.clone();
+            ins.push(String::new());
+            (s, ins)
+        }
+        Dest::After { path, symbol } => {
+            let (_, e) = symbol_lines(files, path, symbol)?;
+            (e, [vec![String::new()], block.clone()].concat())
+        }
+        Dest::End { path } => {
+            let f = files.get(path)?;
+            let lines = f.lines.get_or_insert_with(|| {
+                created = true;
+                vec![]
+            });
+            let gap = lines.last().is_some_and(|l| !l.trim().is_empty());
+            let ins = if gap {
+                [vec![String::new()], block.clone()].concat()
+            } else {
+                block.clone()
+            };
+            (lines.len(), ins)
+        }
+    };
+    let (at, ins) = at;
+    let f = files.get(dest)?;
+    f.splice(at, 0, &ins);
+    f.dirty = true;
+    Ok(if dest == path {
+        vec![Change::Modified {
+            path: path.into(),
+            added: block.len(),
+            removed: block.len(),
+        }]
+    } else {
+        vec![
+            Change::Modified {
+                path: path.into(),
+                added: 0,
+                removed: block.len(),
+            },
+            if created {
+                Change::Added {
+                    path: dest.clone(),
+                    lines: ins.len(),
+                }
+            } else {
+                Change::Modified {
+                    path: dest.clone(),
+                    added: block.len(),
+                    removed: 0,
+                }
+            },
+        ]
     })
+}
+
+/// Files named by `*** Replace All`: plain files, directories (walked, respecting `.gitignore`) and globs.
+fn expand_paths(root: &Path, specs: &[String]) -> Result<Vec<(String, bool)>> {
+    let (globs, plain): (Vec<_>, Vec<_>) = specs.iter().partition(|s| s.contains(['*', '?', '[']));
+    let mut out = Vec::new();
+    let mut dirs = Vec::new();
+    for p in plain {
+        if root.join(p).is_dir() {
+            dirs.push(root.join(p));
+        } else {
+            out.push((p.clone(), true));
+        }
+    }
+    if !globs.is_empty() && dirs.is_empty() {
+        dirs.push(root.to_path_buf());
+    }
+    if !dirs.is_empty() {
+        let found = Mutex::new(Vec::new());
+        let opts = acus_walk::WalkOpts {
+            roots: dirs,
+            include: globs.into_iter().cloned().collect(),
+            ..Default::default()
+        };
+        acus_walk::walk(&opts, |p| {
+            let rel = p.strip_prefix(root).map(PathBuf::from).unwrap_or(p.into());
+            found.lock().unwrap().push(acus_walk::display_path(&rel));
+        })?;
+        let mut found = found.into_inner().unwrap();
+        found.sort();
+        out.extend(found.into_iter().map(|p| (p, false)));
+    }
+    Ok(out)
+}
+
+fn replace_all(files: &mut Files, specs: &[String], blocks: &[Block]) -> Result<Vec<Change>> {
+    let mut res = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        let (search, replace) = (b.search.join("\n"), b.replace.join("\n"));
+        let pat = if b.regex {
+            format!("(?m){search}")
+        } else {
+            regex::escape(&search)
+        };
+        let re = Regex::new(&pat).map_err(|e| anyhow!("block {}: {e}", i + 1))?;
+        res.push((re, replace, b.regex));
+    }
+    let mut hits = vec![0; blocks.len()];
+    let mut changes = Vec::new();
+    for (path, explicit) in expand_paths(files.root, specs)? {
+        let lines = match files.lines(&path) {
+            Ok(l) => l.clone(),
+            Err(e) if explicit => return Err(e),
+            // Binary or unreadable files met while walking a directory.
+            Err(_) => continue,
+        };
+        let (mut lines, before) = (lines.clone(), lines.len());
+        let mut hunks = Vec::new();
+        for (k, (re, rep, expand)) in res.iter().enumerate() {
+            let h = replace_in(&lines, re, rep, *expand);
+            hits[k] += h.len();
+            for (at, old, new) in h.into_iter().rev() {
+                lines.splice(at..at + old, new.iter().cloned());
+                hunks.push((at, old, new));
+            }
+        }
+        if hunks.is_empty() {
+            continue;
+        }
+        // Replay the hunks through `splice` so the printed regions are right.
+        let f = files.get(&path)?;
+        let marked = |f: &File| f.edits.iter().map(|e| e.1).sum::<usize>();
+        let m0 = marked(f);
+        for (at, old, new) in hunks {
+            f.splice(at, old, &new);
+        }
+        f.dirty = true;
+        // Lines touched by several blocks count once.
+        let added = marked(f).saturating_sub(m0);
+        changes.push(Change::Modified {
+            path,
+            added,
+            removed: (added + before).saturating_sub(lines.len()),
+        });
+    }
+    if let Some(k) = hits.iter().position(|&n| n == 0) {
+        let first = blocks[k].search.iter().find(|l| !l.trim().is_empty());
+        bail!(
+            "Replace All block {}: `{}` matches nothing in {}\nhint: search text is literal and whitespace-exact; use `<<<<<<< REGEX` for patterns",
+            k + 1,
+            first.map_or("", |s| s.trim()),
+            specs.join(" ")
+        );
+    }
+    Ok(changes)
+}
+
+/// Replaces every match of `re` and returns `(line, old count, new lines)` per run of touched lines.
+fn replace_in(
+    lines: &[String],
+    re: &Regex,
+    rep: &str,
+    expand: bool,
+) -> Vec<(usize, usize, Vec<String>)> {
+    let text = lines.join("\n");
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_of = |b: usize| starts.partition_point(|&s| s <= b) - 1;
+    let end_of = |l: usize| starts.get(l + 1).map_or(text.len(), |&s| s - 1);
+    let mut hunks: Vec<(usize, usize, String)> = Vec::new();
+    let mut pos = 0;
+    for c in re.captures_iter(&text) {
+        let m = c.get(0).unwrap();
+        if m.is_empty() {
+            continue;
+        }
+        let (l0, l1) = (line_of(m.start()), line_of(m.end()));
+        let r = sub(&c, rep, expand);
+        match hunks.last_mut() {
+            Some((_, e, s)) if *e >= l0 => {
+                s.push_str(&text[pos..m.start()]);
+                s.push_str(&r);
+                *e = (*e).max(l1);
+            }
+            last => {
+                if let Some((_, e, s)) = last {
+                    s.push_str(&text[pos..end_of(*e)]);
+                }
+                hunks.push((l0, l1, format!("{}{r}", &text[starts[l0]..m.start()])));
+            }
+        }
+        pos = m.end();
+    }
+    if let Some((_, e, s)) = hunks.last_mut() {
+        s.push_str(&text[pos..end_of(*e)]);
+    }
+    hunks
+        .into_iter()
+        .map(|(a, b, s)| {
+            (
+                a,
+                b - a + 1,
+                s.split('\n').map(Into::into).collect::<Vec<String>>(),
+            )
+        })
+        .filter(|(a, n, new)| lines[*a..*a + n] != new[..])
+        .collect()
+}
+
+fn sub(c: &Captures, rep: &str, expand: bool) -> String {
+    let mut r = String::new();
+    if expand {
+        c.expand(rep, &mut r);
+    } else {
+        r.push_str(rep);
+    }
+    r
 }
 
 type Eq = fn(&str, &str) -> bool;
@@ -391,10 +676,15 @@ fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
     }
     if let Some(i) = lines
         .iter()
-        .position(|l| !first.is_empty() && l.trim().starts_with(first))
+        .position(|l| !first.is_empty() && l.contains(first))
     {
+        let how = if lines[i].trim().starts_with(first) {
+            "only starts with"
+        } else {
+            "only contains"
+        };
         return format!(
-            "hint: line {} only starts with it; context and `-` lines must be whole lines: `{}`",
+            "hint: line {} {how} it; context, `-` and SEARCH lines must be whole lines (for part of a line use `*** Replace All: path`): `{}`",
             i + 1,
             lines[i].trim()
         );

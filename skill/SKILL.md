@@ -1,6 +1,6 @@
 ---
 name: acus
-description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, editing several places or files at once, running a build or tests and inspecting the failing code, or reviewing uncommitted changes — i.e. whenever about to run grep, rg, find, cat, head, tail, sed -n or git diff, or to Read a file just to look something up.
+description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, editing several places or files at once (instead of sed -i, perl -pi or a Python str.replace/re.sub script), renaming across files, moving or deleting a function, running a build or tests and inspecting the failing code, or reviewing uncommitted changes — i.e. whenever about to run grep, rg, find, cat, head, tail, sed -n or git diff, or to Read a file just to look something up.
 ---
 
 # acus
@@ -15,9 +15,9 @@ One call answers what usually takes search → read → read. Output is line-num
 | …plus the code around each hit | `acus find 'PAT' --block` |
 | What a file or directory contains | `acus outline PATH… [--depth 1]` |
 | A symbol, line range or file | `acus show src/a.rs#Parser::parse src/b.rs:40-80 README.md` |
-| Several independent lookups | `echo '[["find","X"],["show","a.rs#f"]]' \| acus run` |
-| Edit files or replace a symbol | `acus patch` with the patch on stdin |
-| Run tests/build and see the failing code | `acus ctx 'cargo test -q'` |
+| Several independent lookups | `acus run` with one command per line on stdin |
+| Edit, rename across files, move or delete a symbol | `acus patch` with the patch on stdin |
+| Run tests/build and see the failing code | `acus ctx 'cargo test -q'` (noise is dropped; `--drop 'RE'` for more) |
 | What changed (before a commit, review or handoff) | `acus diff [REV] [-p]` |
 
 ## Patch
@@ -43,6 +43,44 @@ EOF
 ```
 
 Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written, so fix that hunk and resend the whole patch. `--check` validates only.
+
+More directives, mixable with the above in one patch:
+
+```
+*** Update File: src/a.rs
+<<<<<<< SEARCH
+    let x = 1;
+=======
+    let x = 2;
+>>>>>>> REPLACE
+*** Replace All: src *.py
+<<<<<<< SEARCH
+old_name(
+=======
+new_name(
+>>>>>>> REPLACE
+<<<<<<< REGEX
+fn (\w+)_old\(
+=======
+fn ${1}_new(
+>>>>>>> REPLACE
+*** Delete Symbol: src/a.rs#unused
+*** Move Symbol: src/a.rs#helper
+*** After: src/b.rs#main
+```
+
+- SEARCH/REPLACE inside `Update File` matches whole lines (an `@@` line before it narrows the place).
+- `Replace All` takes files, directories and globs and changes every occurrence; a block that matches nothing fails the patch.
+- `Delete Symbol` and `Move Symbol` take the doc comments and attributes along; `Move Symbol` needs `*** Before:` or `*** After: path#Sym`, or `*** To: path`.
+
+Batch lookups, one command per line:
+
+```bash
+acus run <<'EOF'
+find 'fn parse' --block
+show src/a.rs#f src/b.rs:10-30
+EOF
+```
 
 ## Reading the output
 
