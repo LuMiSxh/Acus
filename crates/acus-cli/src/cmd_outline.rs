@@ -48,7 +48,9 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         };
         walk(&opts, |f| {
             if Lang::from_path(f).is_some() {
-                found.lock().unwrap().push(parse(f));
+                // Parse before locking, or the threads take turns.
+                let r = parse(f);
+                found.lock().unwrap().push(r);
             }
         })?;
     }
