@@ -103,21 +103,37 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         );
     }
     println!("{}", out.header(&format!("== exit {code}")));
-    for (p, l) in refs.iter().take(a.max_refs) {
+    // References into the same snippet print it once, with every referenced line marked.
+    let mut shown: Vec<(String, usize, Vec<String>, Vec<usize>)> = Vec::new();
+    let mut more = 0;
+    for (p, l) in &refs {
         let Some((label, start, body)) = snippet(p, *l, &a) else {
             continue;
         };
-        println!("{}", out.header(&format!("== {label} (line {l})")));
-        for (i, t) in body.iter().enumerate() {
-            println!("{}", out.numbered(start + i, t, start + i == *l));
+        if let Some(s) = shown.iter_mut().find(|s| s.0 == label && s.1 == start) {
+            s.3.push(*l);
+        } else if shown.len() < a.max_refs {
+            shown.push((label, start, body, vec![*l]));
+        } else {
+            more += 1;
         }
     }
-    if refs.len() > a.max_refs {
+    for (label, start, body, marks) in &shown {
+        let ls: Vec<String> = marks.iter().map(ToString::to_string).collect();
+        let word = if marks.len() > 1 { "lines" } else { "line" };
         println!(
-            "… {} more locations (--max-refs {})",
-            refs.len() - a.max_refs,
-            refs.len()
+            "{}",
+            out.header(&format!("== {label} ({word} {})", ls.join(", ")))
         );
+        for (i, t) in body.iter().enumerate() {
+            println!(
+                "{}",
+                out.numbered(start + i, t, marks.contains(&(start + i)))
+            );
+        }
+    }
+    if more > 0 {
+        println!("… {more} more locations (--max-refs {})", a.max_refs + more);
     }
     Ok(Outcome::Exit(code.clamp(0, 255) as u8))
 }
@@ -170,7 +186,17 @@ const NOISE: &[&str] = &[
     // svelte-check, mix.
     r"^(Loading svelte-check|Getting Svelte diagnostics|====================================)",
     r"^(==> \S+$|Compiling \d+ files? \(\.\w+\)$|Generated \S+ app$)",
+    // Stack frames inside the toolchain or dependencies; frames in your own code stay.
+    r"^\s+\d+: +(std|core|alloc|test|rust_begin_unwind|__rust|<unknown>|_?_?pthread|thread_start|_start\b|start_thread|clone3?\b)",
+    r"^\s+at (/rustc/|.*(node:internal|node_modules[/\\]|/\.cargo/registry/))",
+    r"^note: (run with `RUST_BACKTRACE=1`|Some details are omitted, run with `RUST_BACKTRACE=full`)",
 ];
+
+/// A Python traceback frame outside the project; the code lines indented below it go too.
+static PY_LIB_FRAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(\s*)File "[^"]*(site-packages|dist-packages|/lib/python\d[\d.]*/|<frozen )"#)
+        .unwrap()
+});
 
 static NOISE_SET: LazyLock<RegexSet> = LazyLock::new(|| RegexSet::new(NOISE).unwrap());
 
@@ -199,7 +225,21 @@ fn quiet(lines: &[&str], extra: &RegexSet) -> (Vec<String>, usize, usize) {
             *repeat = 0;
         }
     };
-    let noise = |l: &str| NOISE_SET.is_match(l) || extra.is_match(l);
+    let mut frame: Option<usize> = None;
+    let mut noise = |l: &str| {
+        let ind = l.len() - l.trim_start().len();
+        if let Some(f) = frame {
+            if ind > f && !l.trim().is_empty() {
+                return true;
+            }
+            frame = None;
+        }
+        if let Some(c) = PY_LIB_FRAME.captures(l) {
+            frame = Some(c[1].len());
+            return true;
+        }
+        NOISE_SET.is_match(l) || extra.is_match(l)
+    };
     for &l in lines.iter().filter(|l| !noise(l)) {
         if let Some(r) = l.trim_start().strip_prefix("test result: ok. ") {
             passed += r
@@ -369,6 +409,28 @@ mod tests {
                 "tests/test_a.py ..F.  [100%]",
                 "warn: x (×3)",
                 "done"
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_library_stack_frames() {
+        let out = "thread 'main' panicked at src/main.rs:3:5:\nboom\nstack backtrace:\n   0: rust_begin_unwind\n             at /rustc/abc/library/std/src/panicking.rs:665:5\n   1: app::run\n             at ./src/main.rs:3:5\nnote: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\nTraceback (most recent call last):\n  File \"/x/app.py\", line 3, in <module>\n    go()\n  File \"/usr/lib/python3.12/site-packages/lib.py\", line 9, in go\n    raise X\n    ^^^^^^^\nX: bad\n    at run (src/a.ts:4:9)\n    at Module._compile (node:internal/modules/cjs/loader:1105:14)";
+        let l: Vec<&str> = out.lines().collect();
+        let (v, _, _) = quiet(&l, &RegexSet::empty());
+        assert_eq!(
+            v,
+            [
+                "thread 'main' panicked at src/main.rs:3:5:",
+                "boom",
+                "stack backtrace:",
+                "   1: app::run",
+                "             at ./src/main.rs:3:5",
+                "Traceback (most recent call last):",
+                "  File \"/x/app.py\", line 3, in <module>",
+                "    go()",
+                "X: bad",
+                "    at run (src/a.ts:4:9)"
             ]
         );
     }

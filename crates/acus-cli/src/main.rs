@@ -103,7 +103,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Find(a) => cmd_find::run(a, &out),
         Cmd::Outline(a) => cmd_outline::run(a, &out),
         Cmd::Show(a) => cmd_show::run(a, &out),
-        Cmd::Patch(a) => cmd_patch::run(a, &out, nested),
+        Cmd::Patch(a) => cmd_patch::run(a, &out, nested, &cfg),
         Cmd::Usage(a) => cmd_usage::run(a, &out),
         Cmd::Decide(a) => cmd_decide::run(a, &out, &cfg),
         Cmd::Run(_) if nested => bail!("`run` cannot be nested"),

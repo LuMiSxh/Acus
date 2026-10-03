@@ -12,6 +12,7 @@ pub struct Config {
     pub commands: Commands,
     pub decide: Decide,
     pub ctx: Ctx,
+    pub patch: Patch,
     #[serde(skip)]
     pub path: PathBuf,
 }
@@ -28,6 +29,13 @@ pub struct Commands {
 pub struct Ctx {
     /// Extra regexes; `acus ctx` drops output lines matching any of them.
     pub drop: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Patch {
+    /// Run the file's formatter after every patch, as if `--fmt` was given.
+    pub fmt: bool,
 }
 
 #[derive(Deserialize, Default)]

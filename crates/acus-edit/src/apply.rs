@@ -365,14 +365,15 @@ fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result
     let at = match to {
         Dest::Before { path, symbol } => {
             let (s, e) = symbol_lines(files, path, symbol)?;
-            let s = with_attached(files.lines(path)?, path, s, e).0;
-            let mut ins = block.clone();
+            let lines = files.lines(path)?;
+            let mut ins = reindent(&block, indent(&lines[s]));
             ins.push(String::new());
-            (s, ins)
+            (with_attached(lines, path, s, e).0, ins)
         }
         Dest::After { path, symbol } => {
-            let (_, e) = symbol_lines(files, path, symbol)?;
-            (e, [vec![String::new()], block.clone()].concat())
+            let (s, e) = symbol_lines(files, path, symbol)?;
+            let ins = reindent(&block, indent(&files.lines(path)?[s]));
+            (e, [vec![String::new()], ins].concat())
         }
         Dest::End { path } => {
             let f = files.get(path)?;
@@ -381,10 +382,11 @@ fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result
                 vec![]
             });
             let gap = lines.last().is_some_and(|l| !l.trim().is_empty());
+            let block = reindent(&block, "");
             let ins = if gap {
-                [vec![String::new()], block.clone()].concat()
+                [vec![String::new()], block].concat()
             } else {
-                block.clone()
+                block
             };
             (lines.len(), ins)
         }
@@ -420,6 +422,28 @@ fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result
             },
         ]
     })
+}
+
+fn indent(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// Shifts a moved block so its least indented line gets `to`, e.g. a method moved out of a class.
+fn reindent(block: &[String], to: &str) -> Vec<String> {
+    let from = block
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent(l))
+        .min_by_key(|i| i.len())
+        .unwrap_or("");
+    block
+        .iter()
+        .map(|l| match l.strip_prefix(from) {
+            _ if l.trim().is_empty() => String::new(),
+            Some(rest) => format!("{to}{rest}"),
+            None => l.clone(),
+        })
+        .collect()
 }
 
 /// Files named by `*** Replace All`: plain files, directories (walked, respecting `.gitignore`) and globs.

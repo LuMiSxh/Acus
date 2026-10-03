@@ -360,3 +360,21 @@ fn replacement_may_contain_example_blocks() {
         "# Docs\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
     );
 }
+
+#[test]
+fn moved_symbols_take_the_indent_of_their_new_place() {
+    let d = dir(&[(
+        "a.py",
+        "class A:\n    def m(self):\n        return 1\n\n    def n(self):\n        pass\n\n\ndef top():\n    pass\n",
+    )]);
+    run(d.path(), "*** Move Symbol: a.py#A.m\n*** After: a.py#top\n").unwrap();
+    assert_eq!(
+        read(d.path(), "a.py"),
+        "class A:\n    def n(self):\n        pass\n\n\ndef top():\n    pass\n\ndef m(self):\n    return 1\n"
+    );
+    run(d.path(), "*** Move Symbol: a.py#m\n*** Before: a.py#A.n\n").unwrap();
+    assert_eq!(
+        read(d.path(), "a.py"),
+        "class A:\n    def m(self):\n        return 1\n\n    def n(self):\n        pass\n\n\ndef top():\n    pass\n"
+    );
+}

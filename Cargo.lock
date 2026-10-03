@@ -20,6 +20,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "toml",
 ]

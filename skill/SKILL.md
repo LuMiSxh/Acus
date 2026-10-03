@@ -25,7 +25,7 @@ One call answers what usually takes search → read → read. Output is line-num
 Codex `apply_patch` format; `@@` takes the start of an enclosing line. No prior Read needed.
 
 ```bash
-acus patch <<'EOF'
+acus patch --fmt <<'PATCH'
 *** Begin Patch
 *** Update File: src/lib.rs
 @@ fn parse
@@ -39,10 +39,10 @@ acus patch <<'EOF'
 +hello
 *** Delete File: old.rs
 *** End Patch
-EOF
+PATCH
 ```
 
-Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written, so fix that hunk and resend the whole patch. `--check` validates only.
+Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written, so fix that hunk and resend the whole patch. `--check` validates only. `--fmt` runs the file's formatter (rustfmt, ruff/black, prettier, swift-format, gofmt) and prints the formatted lines, so the next patch's context still matches. Pick a heredoc delimiter that no line of the patch equals (`PATCH`, or `ACUS_END` when editing docs or scripts). Symbols may be written `Class.method` too.
 
 More directives, mixable with the above in one patch:
 
