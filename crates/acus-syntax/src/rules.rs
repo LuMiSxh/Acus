@@ -81,7 +81,7 @@ fn swift(n: Node, src: &[u8]) -> Option<Class> {
         "protocol_declaration" => named("protocol", n, src, false),
         "function_declaration" | "protocol_function_declaration" => leaf("func"),
         "init_declaration" => Some(Class {
-            kind: "init",
+            kind: "func",
             name: "init".into(),
             detail: None,
             leaf: true,
@@ -124,17 +124,23 @@ fn python(n: Node, src: &[u8]) -> Option<Class> {
 }
 
 fn markdown(n: Node, src: &[u8]) -> Option<Class> {
-    if n.kind() != "section" {
-        return None;
-    }
-    let mut cur = n.walk();
-    let heading = n
-        .named_children(&mut cur)
-        .find(|c| c.kind() == "atx_heading")?;
+    // ATX headings open a section; setext headings (`Title\n---`) stand alone in one.
+    let heading = match n.kind() {
+        "section" => {
+            let mut cur = n.walk();
+            n.named_children(&mut cur)
+                .find(|c| c.kind() == "atx_heading")?
+        }
+        "setext_heading" => n,
+        _ => return None,
+    };
     let mut c2 = heading.walk();
-    let level = heading
-        .named_children(&mut c2)
-        .find_map(|c| c.kind().strip_prefix("atx_h")?.strip_suffix("_marker"));
+    let level = heading.named_children(&mut c2).find_map(|c| {
+        let k = c.kind();
+        k.strip_prefix("atx_h")
+            .and_then(|k| k.strip_suffix("_marker"))
+            .or_else(|| k.strip_prefix("setext_h")?.strip_suffix("_underline"))
+    });
     let kind = match level? {
         "1" => "h1",
         "2" => "h2",
@@ -148,16 +154,20 @@ fn markdown(n: Node, src: &[u8]) -> Option<Class> {
         kind,
         name,
         detail: None,
-        leaf: false,
+        leaf: n.kind() == "setext_heading",
     })
 }
 
-/// Top-level tables/keys only; nested values stay folded.
+/// Tables and keys; keys holding tables or mappings are searched for nested keys.
 fn data(n: Node, src: &[u8]) -> Option<Class> {
     let (kind, key) = match n.kind() {
         "table" => ("table", n.named_child(0)?),
         "table_array_element" => ("array", n.named_child(0)?),
-        "pair" | "block_mapping_pair" => ("key", n.child_by_field_name("key")?),
+        // TOML pairs have no `key` field; the key is their first child.
+        "pair" | "block_mapping_pair" => (
+            "key",
+            n.child_by_field_name("key").or_else(|| n.named_child(0))?,
+        ),
         _ => return None,
     };
     let name = text(key, src)
@@ -169,6 +179,6 @@ fn data(n: Node, src: &[u8]) -> Option<Class> {
         kind,
         name,
         detail: None,
-        leaf: true,
+        leaf: false,
     })
 }

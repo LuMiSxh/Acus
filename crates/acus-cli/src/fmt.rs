@@ -46,11 +46,28 @@ impl Out {
     }
 }
 
-/// Trim leading whitespace and cap a hit line at 200 chars.
-pub fn hit_text(s: &str) -> String {
+/// Trim leading whitespace and clip a hit line around its match (byte offset `col`).
+pub fn hit_text(s: &str, col: usize) -> String {
     let t = s.trim_start();
-    match t.char_indices().nth(200) {
-        Some((i, _)) => format!("{}…", &t[..i]),
-        None => t.to_owned(),
+    clip(t, col.saturating_sub(s.len() - t.len()))
+}
+
+/// Cap a line at 200 chars, keeping the window around byte offset `col`, so a
+/// minified file costs a few hundred bytes per hit instead of the whole line.
+pub fn clip(t: &str, col: usize) -> String {
+    const MAX: usize = 200;
+    if t.chars().nth(MAX).is_none() {
+        return t.to_owned();
     }
+    let at = t.get(..col).map_or(0, |p| p.chars().count());
+    let start = at.saturating_sub(60);
+    let body: String = t.chars().skip(start).take(MAX).collect();
+    let rest = t.chars().count() - start - body.chars().count();
+    let head = if start > 0 { "…" } else { "" };
+    let tail = if rest > 0 {
+        format!("… (+{rest} chars)")
+    } else {
+        String::new()
+    };
+    format!("{head}{body}{tail}")
 }

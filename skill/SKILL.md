@@ -87,7 +87,7 @@ EOF
 
 - Exit 0 = results, 1 = nothing found (not a failure), 2 = error plus a `hint:` line with the fix; `ctx` returns the command's own code.
 - `… N more …` names the follow-up command; run it instead of searching again.
-- Addresses from earlier output (`path#Sym`, `path:A-B`) can be pasted verbatim; a unique suffix such as `#parse` is enough, and an ambiguous one lists the candidates.
+- Addresses from earlier output (`path#Sym`, `path:A-B`) can be pasted verbatim; a unique suffix such as `#parse` is enough, and an ambiguous one lists the candidates. Config keys nest: `cfg.yaml#server.port`.
 
 ## Common mistakes
 

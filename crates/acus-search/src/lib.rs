@@ -3,6 +3,7 @@
 use acus_syntax::{Lang, Outline, outline};
 use acus_walk::{WalkOpts, display_path, walk};
 use anyhow::{Context, Result};
+use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use serde::Serialize;
@@ -23,6 +24,9 @@ pub struct FindOpts {
 #[derive(Debug, Serialize)]
 pub struct Hit {
     pub line: usize,
+    /// Byte offset of the first match in `text`.
+    #[serde(skip)]
+    pub col: usize,
     pub text: String,
 }
 
@@ -62,9 +66,16 @@ pub fn find(o: &FindOpts) -> Result<Vec<FileHits>> {
             .build();
         let mut hits = Vec::new();
         let sink = Lossy(|n, line| {
+            let text = line.trim_end_matches(['\n', '\r']);
+            let col = matcher
+                .find(text.as_bytes())
+                .ok()
+                .flatten()
+                .map_or(0, |m| m.start());
             hits.push(Hit {
                 line: n as usize,
-                text: line.trim_end_matches(['\n', '\r']).to_owned(),
+                col,
+                text: text.to_owned(),
             });
             Ok(true)
         });

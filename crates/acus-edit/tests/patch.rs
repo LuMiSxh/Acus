@@ -307,6 +307,15 @@ fn replace_all_takes_dirs_whole_and_globs_anywhere() {
 }
 
 #[test]
+fn symbols_stay_in_their_language() {
+    let d = dir(&[("a.rs", "fn one() {}\n"), ("b.py", "x = 1\n")]);
+    let e = run(d.path(), "*** Move Symbol: a.rs#one\n*** To: b.py\n").unwrap_err();
+    assert!(e.to_string().contains("cannot move rust code"), "{e:#}");
+    let e = run(d.path(), "*** Replace Symbol: a.rs#one\n").unwrap_err();
+    assert!(e.to_string().contains("Delete Symbol"), "{e:#}");
+}
+
+#[test]
 fn moving_a_symbol_next_to_itself_is_refused() {
     let d = dir(&[("a.rs", "fn one() {}\n\nfn two() {}\n")]);
     let e = run(d.path(), "*** Move Symbol: a.rs#one\n*** After: a.rs#one\n").unwrap_err();

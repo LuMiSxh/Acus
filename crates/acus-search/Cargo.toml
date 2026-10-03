@@ -10,6 +10,7 @@ license.workspace = true
 acus-syntax.workspace = true
 acus-walk.workspace = true
 anyhow.workspace = true
+grep-matcher.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 serde.workspace = true

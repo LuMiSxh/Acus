@@ -58,7 +58,7 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API |
 
-Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough.
+Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
 Exit codes are 0 for results, 1 for nothing found and 2 for errors. Errors carry a `hint:` line. `ctx` passes on the exit code of the command it ran.
 
