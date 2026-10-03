@@ -240,7 +240,12 @@ fn git(args: &[&str]) -> Result<String> {
             args.iter()
                 .find(|a| !a.starts_with('-') && !a.contains('='))
                 .unwrap_or(&""),
-            String::from_utf8_lossy(&o.stderr).trim()
+            // git appends its whole usage text to some errors; the first line says it all.
+            String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("failed")
+                .trim_start_matches("warning: ")
         );
     }
     Ok(String::from_utf8_lossy(&o.stdout).into_owned())

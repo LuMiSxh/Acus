@@ -45,6 +45,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
             include: include.clone(),
             exclude: exclude.iter().map(|g| g[1..].to_owned()).collect(),
             hidden: a.hidden,
+            no_ignore: false,
         };
         walk(&opts, |f| {
             if Lang::from_path(f).is_some() {

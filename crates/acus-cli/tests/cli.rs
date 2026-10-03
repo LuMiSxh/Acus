@@ -57,10 +57,29 @@ fn find_caps_hits() {
 }
 
 #[test]
+fn find_rg_habits() {
+    let (code, out, _) = acus(&["find", "needle", "-l", "-n"]);
+    assert_eq!(code, 0);
+    assert!(out.lines().all(|l| !l.contains('\t')), "{out}");
+    assert_eq!(acus(&["find", "-w", "needl"]).0, 1);
+    assert_eq!(
+        acus(&["find", "needle", "-t", "rust", "-l"])
+            .1
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn find_nothing_exits_1() {
     assert_eq!(
         acus(&["find", "zzz_not_here"]),
-        (1, String::new(), String::new())
+        (
+            1,
+            String::new(),
+            "(no matches; hidden and .gitignored files were skipped: --hidden, -u)\n".into()
+        )
     );
 }
 
@@ -199,6 +218,17 @@ fn decide_without_endpoint_has_hint() {
     let (code, _, err) = acus(&["decide", "ok?", "--state", "x"]);
     assert_eq!(code, 2);
     assert!(err.contains("ACUS_DECIDE_URL"), "{err}");
+}
+
+#[test]
+fn run_survives_a_bad_line() {
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"));
+    let (code, out, _) = acus_in(dir, &["run"], "find \"open\nshow src/lib.rs:1\n");
+    assert_eq!(code, 2);
+    assert!(
+        out.contains("unclosed") && out.contains("== src/lib.rs 1-1"),
+        "{out}"
+    );
 }
 
 #[test]

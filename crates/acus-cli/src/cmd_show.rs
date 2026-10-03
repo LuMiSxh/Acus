@@ -23,6 +23,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         let path = &addr.path;
         let src = std::fs::read_to_string(path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => anyhow::anyhow!("path not found: {path}"),
+            std::io::ErrorKind::InvalidData => anyhow::anyhow!("{path}: binary file, not shown"),
             _ => anyhow::anyhow!("{path}: {e}"),
         })?;
         let lines: Vec<&str> = src.lines().collect();
@@ -41,14 +42,17 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
                     Resolve::Ambiguous(v) => {
                         let c: Vec<_> = v
                             .iter()
-                            .map(|s| format!("{path}#{} ({}-{})", s.qual, s.start_line, s.end_line))
+                            .map(|s| format!("{path}:{}-{} ({})", s.start_line, s.end_line, s.qual))
                             .collect();
                         bail!("`{q}` is ambiguous in {path}\nhint: {}", c.join(", "))
                     }
                 }
             }
         };
-        if addr.target != Target::Whole && (start == 0 || start > lines.len() || start > end) {
+        if addr.target != Target::Whole && start == 0 {
+            bail!("{path}:0: lines start at 1");
+        }
+        if addr.target != Target::Whole && (start > lines.len() || start > end) {
             bail!("{path} has {} lines", lines.len());
         }
         let widen = if addr.target == Target::Whole {

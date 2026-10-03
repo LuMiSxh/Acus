@@ -310,8 +310,14 @@ fn symbol_lines(files: &mut Files, path: &str, symbol: &str) -> Result<(usize, u
         Resolve::Found(s) => Ok((s.start_line - 1, s.end_line)),
         Resolve::Missing => bail!("{path}: no symbol `{symbol}`\nhint: acus outline {path}"),
         Resolve::Ambiguous(v) => {
-            let c: Vec<_> = v.iter().map(|s| format!("{path}#{}", s.qual)).collect();
-            bail!("{path}: `{symbol}` is ambiguous\nhint: {}", c.join(", "))
+            let c: Vec<_> = v
+                .iter()
+                .map(|s| format!("{path}#{} ({}-{})", s.qual, s.start_line, s.end_line))
+                .collect();
+            bail!(
+                "{path}: `{symbol}` is ambiguous\nhint: {}; same names need `*** Update File:` with an anchor",
+                c.join(", ")
+            )
         }
     }
 }
@@ -351,6 +357,14 @@ fn with_blank(lines: &[String], start: usize, end: usize) -> (usize, usize) {
 
 fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result<Vec<Change>> {
     let (start, end) = symbol_lines(files, path, symbol)?;
+    if let Dest::Before { path: p, symbol: s } | Dest::After { path: p, symbol: s } = to
+        && p == path
+    {
+        let (ds, _) = symbol_lines(files, p, s)?;
+        if (start..end).contains(&ds) {
+            bail!("{path}#{symbol}: cannot move a symbol next to itself or into its own body");
+        }
+    }
     let (start, end) = with_attached(files.lines(path)?, path, start, end);
     let lines = files.lines(path)?;
     let block = lines[start..end].to_vec();
@@ -448,6 +462,12 @@ fn reindent(block: &[String], to: &str) -> Vec<String> {
 
 /// Files named by `*** Replace All`: plain files, directories (walked, respecting `.gitignore`) and globs.
 fn expand_paths(root: &Path, specs: &[String]) -> Result<Vec<(String, bool)>> {
+    // The CLI passes "" for the working directory, which the walker cannot open.
+    let root = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
     let (globs, plain): (Vec<_>, Vec<_>) = specs.iter().partition(|s| s.contains(['*', '?', '[']));
     let mut out = Vec::new();
     let mut dirs = Vec::new();
@@ -458,24 +478,35 @@ fn expand_paths(root: &Path, specs: &[String]) -> Result<Vec<(String, bool)>> {
             out.push((p.clone(), true));
         }
     }
-    if !globs.is_empty() && dirs.is_empty() {
-        dirs.push(root.to_path_buf());
-    }
+    // Directories are taken whole; globs select files anywhere below the root.
+    let mut walks = Vec::new();
     if !dirs.is_empty() {
-        let found = Mutex::new(Vec::new());
+        walks.push((dirs, Vec::new()));
+    }
+    if !globs.is_empty() {
+        walks.push((
+            vec![root.to_path_buf()],
+            globs.into_iter().cloned().collect(),
+        ));
+    }
+    let mut found = Vec::new();
+    for (roots, include) in walks {
+        let hits = Mutex::new(Vec::new());
         let opts = acus_walk::WalkOpts {
-            roots: dirs,
-            include: globs.into_iter().cloned().collect(),
+            roots,
+            include,
             ..Default::default()
         };
         acus_walk::walk(&opts, |p| {
             let rel = p.strip_prefix(root).map(PathBuf::from).unwrap_or(p.into());
-            found.lock().unwrap().push(acus_walk::display_path(&rel));
+            hits.lock().unwrap().push(acus_walk::display_path(&rel));
         })?;
-        let mut found = found.into_inner().unwrap();
-        found.sort();
-        out.extend(found.into_iter().map(|p| (p, false)));
+        found.extend(hits.into_inner().unwrap());
     }
+    found.sort();
+    found.dedup();
+    found.retain(|p| !out.iter().any(|(o, _)| o == p));
+    out.extend(found.into_iter().map(|p| (p, false)));
     Ok(out)
 }
 
@@ -488,7 +519,12 @@ fn replace_all(files: &mut Files, specs: &[String], blocks: &[Block]) -> Result<
         } else {
             regex::escape(&search)
         };
-        let re = Regex::new(&pat).map_err(|e| anyhow!("block {}: {e}", i + 1))?;
+        let re = Regex::new(&pat).map_err(|e| {
+            anyhow!(
+                "Replace All block {}: {e}\nhint: escape ( [ {{ . with \\, or use a SEARCH block for literal text",
+                i + 1
+            )
+        })?;
         res.push((re, replace, b.regex));
     }
     let mut hits = vec![0; blocks.len()];
@@ -531,8 +567,13 @@ fn replace_all(files: &mut Files, specs: &[String], blocks: &[Block]) -> Result<
     }
     if let Some(k) = hits.iter().position(|&n| n == 0) {
         let first = blocks[k].search.iter().find(|l| !l.trim().is_empty());
+        let hint = if blocks[k].regex {
+            "the regex runs per file with (?m); `.` does not cross lines, use \\n or (?s)"
+        } else {
+            "search text is literal and whitespace-exact; use `<<<<<<< REGEX` for patterns"
+        };
         bail!(
-            "Replace All block {}: `{}` matches nothing in {}\nhint: search text is literal and whitespace-exact; use `<<<<<<< REGEX` for patterns",
+            "Replace All block {}: `{}` matches nothing in {}\nhint: {hint}",
             k + 1,
             first.map_or("", |s| s.trim()),
             specs.join(" ")

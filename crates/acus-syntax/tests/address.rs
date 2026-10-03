@@ -46,3 +46,11 @@ fn resolves_exact_suffix_and_ambiguity() {
     // `A` names both the struct and its impl: prefer the container that has children.
     assert!(matches!(resolve(&o, "A"), Resolve::Found(s) if s.kind == "impl"));
 }
+
+#[cfg(feature = "lang-markdown")]
+#[test]
+fn twin_headings_are_ambiguous() {
+    use acus_syntax::{Lang, Resolve, outline, resolve};
+    let o = outline(Lang::Markdown, "# T\n## Usage\na\n## Usage\nb\n").unwrap();
+    assert!(matches!(resolve(&o, "Usage"), Resolve::Ambiguous(v) if v.len() == 2));
+}

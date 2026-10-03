@@ -48,7 +48,7 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 
 | Command | What it does |
 | --- | --- |
-| `acus find PATTERN [PATH...]` | Regex search, hits grouped by enclosing symbol; `--block` adds the bodies |
+| `acus find PATTERN [PATH...]` | Regex search, hits grouped by enclosing symbol; `--block` adds the bodies; `-w`, `-l`, `-t`, `-u` work as in rg |
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
