@@ -49,3 +49,47 @@ fn bad_regex_exits_2_with_error_line() {
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.starts_with("error: "), "{err}");
 }
+
+#[test]
+fn outline_file_and_dir() {
+    insta::assert_snapshot!("outline_file", acus(&["outline", "src/lib.rs"]).1);
+    insta::assert_snapshot!("outline_dir", acus(&["outline", ".", "--depth", "1"]).1);
+}
+
+#[test]
+fn show_symbol_suffix_range_and_markdown() {
+    insta::assert_snapshot!(
+        acus(&[
+            "show",
+            "src/lib.rs#parse",
+            "src/lib.rs:1-3",
+            "README.md#Usage"
+        ])
+        .1
+    );
+}
+
+#[test]
+fn show_errors_have_hints() {
+    let (code, _, err) = acus(&["show", "src/lib.rs#nope"]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        err,
+        "error: no symbol `nope` in src/lib.rs\nhint: acus outline src/lib.rs\n"
+    );
+    let (code, _, err) = acus(&["show", "src/lib.rs:99"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (2, "error: src/lib.rs has 17 lines\n")
+    );
+}
+
+#[test]
+fn show_caps_whole_files() {
+    insta::assert_snapshot!(acus(&["show", "src/lib.rs", "--max-lines", "3"]).1);
+}
+
+#[test]
+fn show_json() {
+    insta::assert_snapshot!(acus(&["show", "src/lib.rs#Parser::new", "--json"]).1);
+}

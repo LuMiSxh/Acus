@@ -26,6 +26,21 @@ Addresses: `path#Qual::Name`, `path:START-END`, `path:LINE`, `path`.
 Output: `--format agent` (default), `--json`, `--human`.
 Exit codes: 0 results, 1 nothing found, 2 error.
 
+## Examples
+
+```bash
+acus find "fn parse" -g '*.rs' --block   # hits plus enclosing function bodies
+acus outline src --depth 1               # top-level symbols of every file
+acus show src/lib.rs#Parser::parse README.md#Usage src/main.rs:10-40
+```
+
+## Agent skill
+
+```bash
+mkdir -p ~/.agents/skills/acus ~/.claude/skills/acus
+cp skill/SKILL.md ~/.agents/skills/acus/ && cp skill/SKILL.md ~/.claude/skills/acus/
+```
+
 ## Licence
 
 MPL-2.0

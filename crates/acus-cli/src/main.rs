@@ -1,4 +1,6 @@
 mod cmd_find;
+mod cmd_outline;
+mod cmd_show;
 mod fmt;
 
 use clap::{Parser, Subcommand};
@@ -26,6 +28,10 @@ struct Cli {
 enum Cmd {
     /// Regex search; hits grouped by file and enclosing symbol.
     Find(cmd_find::Args),
+    /// Symbols with kinds and line ranges; directories are walked.
+    Outline(cmd_outline::Args),
+    /// Print files, line ranges or symbols with line numbers.
+    Show(cmd_show::Args),
 }
 
 pub enum Outcome {
@@ -45,6 +51,8 @@ fn main() -> ExitCode {
     let out = fmt::Out::new(format);
     let res = match cli.cmd {
         Cmd::Find(a) => cmd_find::run(a, &out),
+        Cmd::Outline(a) => cmd_outline::run(a, &out),
+        Cmd::Show(a) => cmd_show::run(a, &out),
     };
     match res {
         Ok(Outcome::Found) => ExitCode::SUCCESS,
