@@ -88,8 +88,13 @@ fn resolve_as<'a>(o: &'a Outline, query: &str) -> Resolve<'a> {
     match hits.as_slice() {
         [] => Resolve::Missing,
         [s] => Resolve::Found(s),
+        // Same-kind twins without children (two `## Usage` headings) stay ambiguous.
         [first, ..] if hits.iter().all(|s| s.qual == first.qual) => {
-            Resolve::Found(hits.iter().find(|s| has_children(s)).unwrap_or(first))
+            match hits.iter().find(|s| has_children(s)) {
+                Some(s) => Resolve::Found(s),
+                None if hits.iter().all(|s| s.kind == first.kind) => Resolve::Ambiguous(hits),
+                None => Resolve::Found(first),
+            }
         }
         _ => Resolve::Ambiguous(hits),
     }

@@ -16,6 +16,8 @@ pub struct FindOpts {
     pub fixed: bool,
     /// Parse files with hits to attach enclosing symbols.
     pub syntax: bool,
+    /// Match whole words only.
+    pub word: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +47,7 @@ pub fn find(o: &FindOpts) -> Result<Vec<FileHits>> {
     };
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(o.ignore_case)
+        .word(o.word)
         .build_many(&pats)
         .context("invalid pattern")?;
     let out = Mutex::new(Vec::new());

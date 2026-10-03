@@ -24,6 +24,7 @@ fn opts(d: &tempfile::TempDir, pats: &[&str]) -> FindOpts {
         ignore_case: false,
         fixed: false,
         syntax: true,
+        word: false,
     }
 }
 

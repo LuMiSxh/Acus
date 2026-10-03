@@ -16,19 +16,32 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
     std::io::stdin()
         .read_to_string(&mut s)
         .context("cannot read stdin")?;
-    let batch: Vec<Vec<String>> = if s.trim_start().starts_with('[') {
-        serde_json::from_str(&s)
-            .context("expected a JSON array of argument arrays\nhint: [[\"find\",\"needle\"],[\"show\",\"src/a.rs#f\"]]")?
+    // A line that does not split (unclosed quote) fails alone instead of the whole batch.
+    let batch: Vec<Result<Vec<String>>> = if s.trim_start().starts_with('[') {
+        let v: Vec<Vec<String>> = serde_json::from_str(&s)
+            .context("expected a JSON array of argument arrays\nhint: [[\"find\",\"needle\"],[\"show\",\"src/a.rs#f\"]]")?;
+        v.into_iter().map(Ok).collect()
     } else {
         s.lines()
             .map(split)
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|a| !a.is_empty())
+            .filter(|a| !matches!(a, Ok(a) if a.is_empty()))
             .collect()
     };
     let (mut found, mut failed) = (false, false);
     for args in batch {
+        let args = match args {
+            Ok(a) => a,
+            Err(e) => {
+                failed = true;
+                match out.format {
+                    Format::Json => {
+                        println!("{}", serde_json::json!({ "error": format!("{e:#}") }))
+                    }
+                    _ => println!("error: {e:#}"),
+                }
+                continue;
+            }
+        };
         let mut argv = vec!["acus".to_owned()];
         argv.extend(args.iter().cloned());
         if out.format == Format::Json {

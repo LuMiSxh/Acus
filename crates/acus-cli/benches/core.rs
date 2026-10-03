@@ -44,6 +44,7 @@ fn opts(root: &Path, pat: &str, syntax: bool) -> FindOpts {
         ignore_case: false,
         fixed: false,
         syntax,
+        word: false,
     }
 }
 

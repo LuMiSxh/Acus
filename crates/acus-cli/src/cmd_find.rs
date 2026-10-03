@@ -22,6 +22,21 @@ pub struct Args {
     fixed_strings: bool,
     #[arg(long)]
     hidden: bool,
+    /// Also search files excluded by .gitignore.
+    #[arg(short = 'u', long)]
+    no_ignore: bool,
+    /// Whole words only.
+    #[arg(short = 'w', long = "word-regexp")]
+    word: bool,
+    /// Only list the files with hits.
+    #[arg(short = 'l', long = "files-with-matches")]
+    files_only: bool,
+    /// File type like rg: rs, rust, py, ts, js, swift, md, … (repeatable).
+    #[arg(short = 't', long = "type")]
+    types: Vec<String>,
+    /// Accepted for rg/grep habits; lines are always numbered.
+    #[arg(short = 'n', hide = true)]
+    _line_numbers: bool,
     /// Print enclosing symbol bodies instead of single lines.
     #[arg(long)]
     block: bool,
@@ -49,8 +64,25 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     if patterns.is_empty() {
         bail!("no pattern given\nhint: acus find PATTERN [PATH...] or -e PAT -e PAT");
     }
-    let (exclude, include): (Vec<String>, Vec<String>) =
+    let (exclude, mut include): (Vec<String>, Vec<String>) =
         a.globs.into_iter().partition(|g| g.starts_with('!'));
+    for t in &a.types {
+        let exts: &[&str] = match t.as_str() {
+            "rust" => &["rs"],
+            "py" | "python" => &["py", "pyi"],
+            "ts" | "typescript" => &["ts", "tsx", "mts", "cts"],
+            "js" | "javascript" => &["js", "jsx", "mjs", "cjs"],
+            "md" | "markdown" => &["md", "markdown"],
+            "yaml" | "yml" => &["yaml", "yml"],
+            "cpp" | "c++" => &["cpp", "cc", "cxx", "hpp", "hh", "h"],
+            other => {
+                include.push(format!("*.{other}"));
+                continue;
+            }
+        };
+        include.extend(exts.iter().map(|e| format!("*.{e}")));
+    }
+    let fixed = a.fixed_strings;
     let opts = FindOpts {
         patterns,
         walk: WalkOpts {
@@ -58,14 +90,31 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
             include,
             exclude: exclude.into_iter().map(|g| g[1..].to_owned()).collect(),
             hidden: a.hidden,
+            no_ignore: a.no_ignore,
         },
         ignore_case: a.ignore_case,
-        fixed: a.fixed_strings,
-        syntax: !a.no_syntax,
+        fixed,
+        syntax: !a.no_syntax && !a.files_only,
+        word: a.word,
     };
-    let files = find(&opts)?;
+    let files = find(&opts).map_err(|e| {
+        if fixed {
+            e
+        } else {
+            anyhow::anyhow!("{e:#}\nhint: escape regex characters like ( [ {{ . with \\, or use -F for literal text")
+        }
+    })?;
     if files.is_empty() {
+        if out.format != Format::Json && !(a.hidden && a.no_ignore) {
+            eprintln!("(no matches; hidden and .gitignored files were skipped: --hidden, -u)");
+        }
         return Ok(Outcome::Empty);
+    }
+    if a.files_only && out.format != Format::Json {
+        files
+            .iter()
+            .for_each(|f| println!("{} {}", f.path, f.hits.len()));
+        return Ok(Outcome::Found);
     }
     // Spend the hit budget in path order.
     let mut budget = a.max_hits;

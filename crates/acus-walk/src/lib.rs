@@ -16,6 +16,8 @@ pub struct WalkOpts {
     pub exclude: Vec<String>,
     /// Visit hidden files and directories too.
     pub hidden: bool,
+    /// Also visit files excluded by .gitignore/.ignore.
+    pub no_ignore: bool,
 }
 
 fn glob_set(globs: &[String]) -> Result<Option<GlobSet>> {
@@ -51,7 +53,9 @@ pub fn walk<F: Fn(&Path) + Sync>(opts: &WalkOpts, visit: F) -> Result<()> {
     for r in &roots[1..] {
         b.add(r);
     }
-    b.hidden(!opts.hidden).require_git(false);
+    b.standard_filters(!opts.no_ignore)
+        .hidden(!opts.hidden)
+        .require_git(false);
     if let Some(ex) = exclude {
         // Like rg: `!dist` drops any file or directory named `dist`, `!src/gen` that path;
         // excluded directories are not descended into.
