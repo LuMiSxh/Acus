@@ -14,6 +14,7 @@ acus-walk = { path = "crates/acus-walk" }
 acus-syntax = { path = "crates/acus-syntax", default-features = false }
 acus-edit = { path = "crates/acus-edit" }
 acus-search = { path = "crates/acus-search" }
+acus-usage = { path = "crates/acus-usage" }
 anstyle = "1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -23,7 +24,7 @@ grep-searcher = "0.1.17"
 ignore = "0.4.33"
 insta = "1.49.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 tempfile = "3.27.0"
 tree-sitter = "0.27.0"
 tree-sitter-javascript = "0.25.0"

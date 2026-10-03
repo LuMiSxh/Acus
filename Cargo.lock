@@ -9,6 +9,7 @@ dependencies = [
  "acus-edit",
  "acus-search",
  "acus-syntax",
+ "acus-usage",
  "acus-walk",
  "anstyle",
  "anyhow",
@@ -56,6 +57,17 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+]
+
+[[package]]
+name = "acus-usage"
+version = "0.1.0"
+dependencies = [
+ "acus-walk",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

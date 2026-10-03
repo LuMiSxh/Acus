@@ -24,6 +24,7 @@ lang-data = ["acus-syntax/lang-data"]
 acus-edit.workspace = true
 acus-search.workspace = true
 acus-syntax.workspace = true
+acus-usage.workspace = true
 acus-walk.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true

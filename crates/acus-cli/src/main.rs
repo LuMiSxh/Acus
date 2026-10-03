@@ -2,6 +2,7 @@ mod cmd_find;
 mod cmd_outline;
 mod cmd_patch;
 mod cmd_show;
+mod cmd_usage;
 mod fmt;
 
 use clap::{Parser, Subcommand};
@@ -35,6 +36,8 @@ enum Cmd {
     Show(cmd_show::Args),
     /// Apply a patch from stdin (Codex apply_patch format + `*** Replace Symbol: path#Sym`).
     Patch(cmd_patch::Args),
+    /// Token, cost and tool-call analytics over Claude Code and Codex transcripts.
+    Usage(cmd_usage::Args),
 }
 
 pub enum Outcome {
@@ -57,6 +60,7 @@ fn main() -> ExitCode {
         Cmd::Outline(a) => cmd_outline::run(a, &out),
         Cmd::Show(a) => cmd_show::run(a, &out),
         Cmd::Patch(a) => cmd_patch::run(a, &out),
+        Cmd::Usage(a) => cmd_usage::run(a, &out),
     };
     match res {
         Ok(Outcome::Found) => ExitCode::SUCCESS,
