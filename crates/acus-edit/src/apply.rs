@@ -251,8 +251,10 @@ const PASSES: [Eq; 3] = [
 fn apply_chunk(lines: &mut Vec<String>, c: &Chunk) -> Result<()> {
     let mut from = 0;
     for a in &c.anchors {
+        // Anchors may also be a line's start (`@@ fn parse` for `    fn parse(&self) {`).
         let found = PASSES
             .iter()
+            .chain([&((|l, a| l.trim_start().starts_with(a.trim())) as Eq)])
             .find_map(|eq| (from..lines.len()).find(|&i| eq(&lines[i], a)));
         from = found.ok_or_else(|| anyhow!("`@@ {a}` not found"))? + 1;
     }

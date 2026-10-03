@@ -35,7 +35,7 @@ fn update_with_anchor_and_context() {
     )]);
     let c = run(
         d.path(),
-        "*** Begin Patch\n*** Update File: a.rs\n@@ fn two() {\n-    let x = 1;\n+    let x = 2;\n+    let y = 3;\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: a.rs\n@@ fn two\n-    let x = 1;\n+    let x = 2;\n+    let y = 3;\n*** End Patch\n",
     )
     .unwrap();
     assert_eq!(
