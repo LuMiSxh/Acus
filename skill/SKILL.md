@@ -1,6 +1,6 @@
 ---
 name: acus
-description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, editing several places or files at once, or running a build or tests and inspecting the failing code — i.e. whenever about to run grep, rg, find, cat, head, tail or sed -n, or to Read a file just to look something up.
+description: Code search, reading and editing CLI that replaces grep/rg/find/cat/sed/head and Read→Edit chains with one call. Use when searching a codebase, locating a definition or its usages, reading a file, function, class or line range, getting an overview of an unfamiliar file or directory, editing several places or files at once, running a build or tests and inspecting the failing code, or reviewing uncommitted changes — i.e. whenever about to run grep, rg, find, cat, head, tail, sed -n or git diff, or to Read a file just to look something up.
 ---
 
 # acus
@@ -18,6 +18,7 @@ One call answers what usually takes search → read → read. Output is line-num
 | Several independent lookups | `echo '[["find","X"],["show","a.rs#f"]]' \| acus run` |
 | Edit files or replace a symbol | `acus patch` with the patch on stdin |
 | Run tests/build and see the failing code | `acus ctx 'cargo test -q'` |
+| What changed (before a commit, review or handoff) | `acus diff [REV] [-p]` |
 
 ## Patch
 

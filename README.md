@@ -53,6 +53,7 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
 | `acus ctx 'COMMAND'` | Runs a build or test and shows the code behind every `path:line` in its output |
+| `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus run` | Several of the above in one process (JSON list of argument lists on stdin) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API |

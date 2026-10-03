@@ -226,3 +226,44 @@ fn ctx_shows_code_behind_output_references() {
         "{out}"
     );
 }
+
+#[test]
+fn diff_groups_changes_by_symbol() {
+    let d = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    std::fs::write(
+        d.path().join("a.rs"),
+        "fn f() {\n    one()\n}\n\nfn gone() {}\n",
+    )
+    .unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "x"]);
+    std::fs::write(d.path().join("a.rs"), "fn f() {\n    two()\n}\n").unwrap();
+    std::fs::write(d.path().join("new.md"), "# Hi\n").unwrap();
+    let (code, out, _) = acus_in(d.path(), &["diff", "-p"], "");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        out,
+        "M a.rs +1 -3\n  fn f 1-3 +1 -1\n\t-    one()\n2\t+    two()\n  (top level) -1\n\t-\n  fn gone (removed) -1\n\t-fn gone() {}\nA new.md +1\n1\t+# Hi\n== 2 files +2 -3\n"
+    );
+    git(&["add", "."]);
+    git(&["commit", "-qm", "y"]);
+    assert_eq!(acus_in(d.path(), &["diff"], "").0, 1);
+}

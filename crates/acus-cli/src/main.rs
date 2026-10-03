@@ -1,5 +1,6 @@
 mod cmd_ctx;
 mod cmd_decide;
+mod cmd_diff;
 mod cmd_find;
 mod cmd_outline;
 mod cmd_patch;
@@ -47,6 +48,8 @@ enum Cmd {
     Decide(cmd_decide::Args),
     /// Run a shell command; print its output plus the code its `path:line` references point at.
     Ctx(cmd_ctx::Args),
+    /// Uncommitted (or `REV`, `A..B`) changes grouped by enclosing symbol; `-p` adds the lines.
+    Diff(cmd_diff::Args),
     /// Run several commands from a JSON array of argument lists on stdin.
     Run(cmd_run::Args),
 }
@@ -62,6 +65,7 @@ impl Cmd {
             Cmd::Decide(_) => "decide",
             Cmd::Run(_) => "run",
             Cmd::Ctx(_) => "ctx",
+            Cmd::Diff(_) => "diff",
         }
     }
 }
@@ -104,6 +108,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Run(_) if nested => bail!("`run` cannot be nested"),
         Cmd::Run(a) => cmd_run::run(a, &out),
         Cmd::Ctx(a) => cmd_ctx::run(a, &out),
+        Cmd::Diff(a) => cmd_diff::run(a, &out),
     }
 }
 
