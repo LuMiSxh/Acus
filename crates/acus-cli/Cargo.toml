@@ -21,6 +21,7 @@ lang-svelte = ["acus-syntax/lang-svelte"]
 lang-data = ["acus-syntax/lang-data"]
 
 [dependencies]
+acus-edit.workspace = true
 acus-search.workspace = true
 acus-syntax.workspace = true
 acus-walk.workspace = true
@@ -31,3 +32,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+tempfile.workspace = true

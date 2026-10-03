@@ -12,6 +12,7 @@ repository = "https://github.com/LuMiSxh/Acus"
 [workspace.dependencies]
 acus-walk = { path = "crates/acus-walk" }
 acus-syntax = { path = "crates/acus-syntax", default-features = false }
+acus-edit = { path = "crates/acus-edit" }
 acus-search = { path = "crates/acus-search" }
 anstyle = "1"
 anyhow = "1.0.104"

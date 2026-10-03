@@ -1,5 +1,6 @@
 mod cmd_find;
 mod cmd_outline;
+mod cmd_patch;
 mod cmd_show;
 mod fmt;
 
@@ -32,6 +33,8 @@ enum Cmd {
     Outline(cmd_outline::Args),
     /// Print files, line ranges or symbols with line numbers.
     Show(cmd_show::Args),
+    /// Apply a patch from stdin (Codex apply_patch format + `*** Replace Symbol: path#Sym`).
+    Patch(cmd_patch::Args),
 }
 
 pub enum Outcome {
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
         Cmd::Find(a) => cmd_find::run(a, &out),
         Cmd::Outline(a) => cmd_outline::run(a, &out),
         Cmd::Show(a) => cmd_show::run(a, &out),
+        Cmd::Patch(a) => cmd_patch::run(a, &out),
     };
     match res {
         Ok(Outcome::Found) => ExitCode::SUCCESS,

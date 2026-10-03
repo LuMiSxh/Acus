@@ -1,0 +1,15 @@
+[package]
+name = "acus-edit"
+description = "Patch parsing and atomic, all-or-nothing file edits for acus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+acus-syntax.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+acus-syntax = { workspace = true, features = ["lang-rust"] }
