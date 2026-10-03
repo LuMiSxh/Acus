@@ -15,6 +15,7 @@ acus-syntax = { path = "crates/acus-syntax", default-features = false }
 acus-edit = { path = "crates/acus-edit" }
 acus-search = { path = "crates/acus-search" }
 acus-usage = { path = "crates/acus-usage" }
+acus-decide = { path = "crates/acus-decide" }
 anstyle = "1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -26,6 +27,7 @@ insta = "1.49.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 tempfile = "3.27.0"
+toml = { version = "1.1.6", default-features = false, features = ["parse", "serde"] }
 tree-sitter = "0.27.0"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-json = "0.24.8"
@@ -37,6 +39,7 @@ tree-sitter-swift = "0.7.3"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
+ureq = { version = "3.4.2", features = ["json"] }
 
 [profile.release]
 lto = "fat"

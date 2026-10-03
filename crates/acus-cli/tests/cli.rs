@@ -1,8 +1,22 @@
 use std::process::Command;
 
+/// The binary with any user config hidden.
+fn bin() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_acus"));
+    c.env("ACUS_CONFIG", "/nonexistent/acus.toml")
+        .env_remove("ACUS_DISABLE")
+        .env_remove("ACUS_DECIDE_URL");
+    c
+}
+
 fn acus(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_acus"))
+    acus_env(args, &[])
+}
+
+fn acus_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let out = bin()
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"))
         .output()
         .unwrap();
@@ -96,7 +110,7 @@ fn show_json() {
 
 fn acus_in(dir: &std::path::Path, args: &[&str], stdin: &str) -> (i32, String, String) {
     use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_acus"))
+    let mut child = bin()
         .args(args)
         .current_dir(dir)
         .stdin(std::process::Stdio::piped())
@@ -141,5 +155,58 @@ fn patch_from_stdin() {
     assert!(
         err.starts_with("error: a.rs: hunk 1: context not found"),
         "{err}"
+    );
+}
+
+#[test]
+fn commands_can_be_disabled_at_runtime() {
+    let (code, _, err) = acus_env(&["find", "needle"], &[("ACUS_DISABLE", "usage, find")]);
+    assert_eq!(code, 2);
+    assert!(
+        err.starts_with("error: acus find is disabled by configuration\nhint: "),
+        "{err}"
+    );
+}
+
+#[test]
+fn invalid_config_is_reported() {
+    let d = tempfile::tempdir().unwrap();
+    let cfg = d.path().join("c.toml");
+    std::fs::write(&cfg, "[commands]\ndisabld = []\n").unwrap();
+    let (code, _, err) = acus_env(&["find", "x"], &[("ACUS_CONFIG", cfg.to_str().unwrap())]);
+    assert_eq!(code, 2);
+    assert!(err.contains("invalid config"), "{err}");
+}
+
+#[cfg(not(feature = "cmd-decide"))]
+#[test]
+fn decide_without_feature_has_hint() {
+    let (code, _, err) = acus(&["decide", "ok?", "--state", "x"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("--features cmd-decide"), "{err}");
+}
+
+#[cfg(feature = "cmd-decide")]
+#[test]
+fn decide_without_endpoint_has_hint() {
+    let (code, _, err) = acus(&["decide", "ok?", "--state", "x"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("ACUS_DECIDE_URL"), "{err}");
+}
+
+#[test]
+fn run_batch() {
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"));
+    let batch = r#"[["show","src/lib.rs#new"],["find","zzz_none"],["show","nope.rs"]]"#;
+    let (code, out, _) = acus_in(dir, &["run"], batch);
+    assert_eq!(code, 2);
+    insta::assert_snapshot!(out);
+    let (code, out, _) = acus_in(dir, &["run", "--json"], r#"[["show","src/lib.rs:1"]]"#);
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            0,
+            "[{\"address\":\"src/lib.rs\",\"end\":1,\"start\":1,\"text\":\"pub struct Parser {\"}]\n"
+        )
     );
 }

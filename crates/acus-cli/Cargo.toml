@@ -19,8 +19,11 @@ lang-python = ["acus-syntax/lang-python"]
 lang-markdown = ["acus-syntax/lang-markdown"]
 lang-svelte = ["acus-syntax/lang-svelte"]
 lang-data = ["acus-syntax/lang-data"]
+# Network judgements via a Jev-compatible API; off by default.
+cmd-decide = ["dep:acus-decide"]
 
 [dependencies]
+acus-decide = { workspace = true, optional = true }
 acus-edit.workspace = true
 acus-search.workspace = true
 acus-syntax.workspace = true
@@ -29,7 +32,9 @@ acus-walk.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

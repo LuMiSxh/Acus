@@ -14,7 +14,12 @@ pub struct Args {
     check: bool,
 }
 
-pub fn run(a: Args, out: &Out) -> Result<Outcome> {
+pub fn run(a: Args, out: &Out, nested: bool) -> Result<Outcome> {
+    if nested && a.file.is_none() {
+        anyhow::bail!(
+            "patch inside run needs --file\nhint: write the patch to a file or call acus patch directly"
+        );
+    }
     let text = match &a.file {
         Some(f) => {
             std::fs::read_to_string(f).with_context(|| format!("cannot read {}", f.display()))?

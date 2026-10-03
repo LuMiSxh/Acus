@@ -1,7 +1,7 @@
 use crate::Outcome;
 use crate::fmt::{Format, Out};
 use acus_syntax::{Address, Lang, Resolve, Target, outline, resolve};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -21,8 +21,10 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     for raw in &a.addrs {
         let addr = Address::parse(raw);
         let path = &addr.path;
-        let src =
-            std::fs::read_to_string(path).with_context(|| format!("path not found: {path}"))?;
+        let src = std::fs::read_to_string(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => anyhow::anyhow!("path not found: {path}"),
+            _ => anyhow::anyhow!("{path}: {e}"),
+        })?;
         let lines: Vec<&str> = src.lines().collect();
         let (label, start, end) = match &addr.target {
             Target::Whole => (path.clone(), 1, lines.len()),
