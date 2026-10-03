@@ -304,3 +304,61 @@ fn diff_groups_changes_by_symbol() {
     git(&["commit", "-qm", "y"]);
     assert_eq!(acus_in(d.path(), &["diff"], "").0, 1);
 }
+
+#[test]
+fn long_lines_and_decorators() {
+    let d = tempfile::tempdir().unwrap();
+    let min = format!("{}needle{}\n", "a;".repeat(5000), ";b".repeat(5000));
+    std::fs::write(d.path().join("min.js"), min).unwrap();
+    std::fs::write(
+        d.path().join("s.py"),
+        "import x\n\n\n@cache\ndef f():\n    pass\n",
+    )
+    .unwrap();
+    let (_, out, _) = acus_in(d.path(), &["find", "needle"], "");
+    assert!(
+        out.len() < 400 && out.contains("needle") && out.contains("chars)"),
+        "{out}"
+    );
+    let (_, out, _) = acus_in(d.path(), &["find", "-e", "--x", "-e", "needle", "-l"], "");
+    assert_eq!(out, "min.js 1\n");
+    let (_, out, _) = acus_in(d.path(), &["show", "s.py#f"], "");
+    assert_eq!(out, "== s.py#f 4-6\n4\t@cache\n5\tdef f():\n6\t    pass\n");
+    let (_, out, _) = acus_in(d.path(), &["run", "--json"], "find zzz\nshow s.py:1\n");
+    assert_eq!(out.lines().next(), Some("null"));
+}
+
+#[test]
+fn unstaged_diff_reads_the_index() {
+    let d = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(d.path())
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(
+        d.path().join("a.rs"),
+        "fn one() {\n    1;\n}\n\nfn two() {\n    2;\n}\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "i"]);
+    git(&["mv", "a.rs", "b.rs"]);
+    std::fs::write(
+        d.path().join("b.rs"),
+        "fn one() {\n    1;\n}\n\nfn two() {\n    3;\n}\n",
+    )
+    .unwrap();
+    let (code, out, _) = acus_in(d.path(), &["diff"], "");
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "M b.rs +1 -1\n  fn two 5-7 +1 -1\n== 1 file +1 -1\n")
+    );
+}

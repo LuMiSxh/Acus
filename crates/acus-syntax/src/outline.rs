@@ -37,6 +37,15 @@ impl Outline {
             .filter(|s| s.start_line <= line && line <= s.end_line)
             .max_by_key(|s| s.depth)
     }
+
+    /// Start each symbol at its doc comments, attributes and decorators.
+    pub fn with_attached(mut self, src: &str, path: &str) -> Self {
+        let lines: Vec<_> = src.lines().collect();
+        for s in &mut self.symbols {
+            s.start_line = attached_start(&lines, path, s.start_line - 1) + 1;
+        }
+        self
+    }
 }
 
 /// Symbols of `src` in source order; `None` when the grammar is not compiled in.
@@ -94,6 +103,45 @@ fn svelte_scripts(src: &str) -> Option<Tree> {
     parse(Lang::TypeScript, src, &ranges)
 }
 
+/// First line (0-based) of the doc comments, attributes and decorators directly
+/// above the line `start`, so a symbol is shown and moved together with them.
+pub fn attached_start<S: AsRef<str>>(lines: &[S], path: &str, mut start: usize) -> usize {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str());
+    if matches!(ext, Some("md" | "markdown" | "json")) {
+        return start;
+    }
+    let hash = matches!(ext, Some("py" | "pyi" | "toml" | "yaml" | "yml" | "sh"));
+    while start > 0 {
+        let l = lines[start - 1].as_ref().trim_start();
+        let attached = ["///", "//", "#[", "#![", "@", "/*", "*"]
+            .iter()
+            .any(|p| l.starts_with(p))
+            || (hash && l.starts_with('#'));
+        if !attached {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+/// A setext heading runs until the next heading or the end of its section.
+fn setext_end(n: Node) -> Option<usize> {
+    if n.kind() != "setext_heading" {
+        return None;
+    }
+    let mut next = n.next_named_sibling();
+    while let Some(s) = next {
+        if matches!(s.kind(), "setext_heading" | "section") {
+            return Some(s.start_position().row);
+        }
+        next = s.next_named_sibling();
+    }
+    Some(end_line(n.parent()?))
+}
+
 fn collect(lang: Lang, node: Node, src: &[u8], stack: &mut Vec<String>, out: &mut Vec<Symbol>) {
     let mut cur = node.walk();
     for child in node.named_children(&mut cur) {
@@ -113,7 +161,7 @@ fn collect(lang: Lang, node: Node, src: &[u8], stack: &mut Vec<String>, out: &mu
             qual,
             depth: stack.len(),
             start_line: child.start_position().row + 1,
-            end_line: end_line(child),
+            end_line: setext_end(child).unwrap_or_else(|| end_line(child)),
             start_byte: child.start_byte(),
             end_byte: child.end_byte(),
         });

@@ -1,5 +1,5 @@
 use crate::Outcome;
-use crate::fmt::{Format, Out, hit_text};
+use crate::fmt::{Format, Out, clip, hit_text};
 use acus_search::{FileHits, FindOpts, find};
 use acus_syntax::Symbol;
 use acus_walk::WalkOpts;
@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 pub struct Args {
     /// Pattern, then paths (like rg). With -e, all positionals are paths.
     positional: Vec<String>,
-    /// Pattern (repeatable).
-    #[arg(short = 'e', long = "regexp")]
+    /// Pattern (repeatable); may start with `-`.
+    #[arg(short = 'e', long = "regexp", allow_hyphen_values = true)]
     patterns: Vec<String>,
     /// Include glob; prefix with ! to exclude (repeatable).
     #[arg(short = 'g', long = "glob")]
@@ -98,10 +98,13 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         word: a.word,
     };
     let files = find(&opts).map_err(|e| {
+        let msg = format!("{e:#}");
         if fixed {
             e
+        } else if msg.contains("look-around") {
+            anyhow::anyhow!("{msg}\nhint: match the surrounding text directly, or narrow with -w / a second -e")
         } else {
-            anyhow::anyhow!("{e:#}\nhint: escape regex characters like ( [ {{ . with \\, or use -F for literal text")
+            anyhow::anyhow!("{msg}\nhint: escape regex characters like ( [ {{ . with \\, or use -F for literal text")
         }
     })?;
     if files.is_empty() {
@@ -164,7 +167,7 @@ fn print_lines(shown: &[(&FileHits, usize)], out: &Out) {
                 );
             }
             last = q;
-            println!("{}\t{}", h.line, hit_text(&h.text));
+            println!("{}\t{}", h.line, hit_text(&h.text, h.col));
         }
     }
 }
@@ -173,6 +176,7 @@ fn print_blocks(shown: &[(&FileHits, usize)], out: &Out, max_lines: usize) {
     for (f, n) in shown {
         let lines: Vec<&str> = f.source.lines().collect();
         let hit_lines: BTreeSet<usize> = f.hits[..*n].iter().map(|h| h.line).collect();
+        let col = |i: usize| f.hits.iter().find(|h| h.line == i).map_or(0, |h| h.col);
         let mut done = BTreeSet::new();
         for &l in &hit_lines {
             let (title, a, b) = match sym(f, l) {
@@ -195,7 +199,8 @@ fn print_blocks(shown: &[(&FileHits, usize)], out: &Out, max_lines: usize) {
             let end = b.min(a + max_lines.max(1) - 1);
             for i in a..=end {
                 let line = lines.get(i - 1).copied().unwrap_or("");
-                println!("{}", out.numbered(i, line, hit_lines.contains(&i)));
+                let line = clip(line, col(i));
+                println!("{}", out.numbered(i, &line, hit_lines.contains(&i)));
             }
             if end < b {
                 println!(

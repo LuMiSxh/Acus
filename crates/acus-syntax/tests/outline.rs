@@ -58,7 +58,7 @@ fn swift_outline() {
         [
             "struct S 1-5",
             "  var S::p 2-2",
-            "  init S::init 3-3",
+            "  func S::init 3-3",
             "  func S::f 4-4",
             "extension S 6-8",
             "  func S::g 7-7",
@@ -106,6 +106,11 @@ fn markdown_outline() {
         rows(Lang::Markdown, src),
         ["h1 Title 1-8", "  h2 Title::Sub One 5-8", "h1 Two 9-9"]
     );
+    let setext = "# T\n\nFirst\n-----\n\na\n\nSecond\n------\nb\n";
+    assert_eq!(
+        rows(Lang::Markdown, setext),
+        ["h1 T 1-10", "  h2 T::First 3-7", "  h2 T::Second 8-10"]
+    );
 }
 
 #[cfg(feature = "lang-svelte")]
@@ -121,17 +126,22 @@ fn svelte_outline_keeps_file_lines() {
 
 #[cfg(feature = "lang-data")]
 #[test]
-fn data_outlines_list_top_level_keys() {
+fn data_outlines_nest_keys() {
     assert_eq!(
         rows(Lang::Toml, "[a]\nb = 1\n[[c.d]]\ne = 2\n"),
-        ["table a 1-2", "array c.d 3-4"]
+        [
+            "table a 1-2",
+            "  key a::b 2-2",
+            "array c.d 3-4",
+            "  key c.d::e 4-4"
+        ]
     );
     assert_eq!(
         rows(Lang::Json, "{\n  \"a\": {\"x\": 1},\n  \"b\": 2\n}\n"),
-        ["key a 2-2", "key b 3-3"]
+        ["key a 2-2", "  key a::x 2-2", "key b 3-3"]
     );
     assert_eq!(
         rows(Lang::Yaml, "a:\n  x: 1\nb: 2\n"),
-        ["key a 1-2", "key b 3-3"]
+        ["key a 1-2", "  key a::x 2-2", "key b 3-3"]
     );
 }

@@ -61,6 +61,11 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let depth = a.depth.unwrap_or(usize::MAX);
+    // Data files can hold thousands of nested keys; list the top level unless asked.
+    let depth_of = |o: &Option<Outline>| match (a.depth, o.as_ref().map(|o| o.lang)) {
+        (None, Some(Lang::Toml | Lang::Json | Lang::Yaml)) => 1,
+        _ => depth,
+    };
     if out.format == Format::Json {
         let v: Vec<_> = files
             .iter()
@@ -68,7 +73,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
                 let syms: Vec<_> = o
                     .iter()
                     .flat_map(|o| &o.symbols)
-                    .filter(|s| s.depth < depth)
+                    .filter(|s| s.depth < depth_of(o))
                     .collect();
                 serde_json::json!({
                     "path": path,
@@ -83,7 +88,8 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     }
     let mut printed = 0;
     for (i, (path, o)) in files.iter().enumerate() {
-        let block = render(path, o.as_ref(), depth, out);
+        let folded = a.depth.is_none() && depth_of(o) == 1;
+        let block = render(path, o.as_ref(), depth_of(o), folded, out);
         if printed > 0 && printed + block.len() > a.max_lines {
             println!(
                 "… {} more files (narrow with -g, a subdirectory, or --depth 1)",
@@ -99,11 +105,12 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     Ok(Outcome::Found)
 }
 
-fn render(path: &str, o: Option<&Outline>, depth: usize, out: &Out) -> Vec<String> {
+fn render(path: &str, o: Option<&Outline>, depth: usize, folded: bool, out: &Out) -> Vec<String> {
     let Some(o) = o else {
         return vec![format!("{path} (no outline)")];
     };
     let mut v = vec![out.header(&format!("{path} {} {}", o.lang.name(), o.lines))];
+    let hidden = o.symbols.iter().filter(|s| s.depth >= depth).count();
     v.extend(o.symbols.iter().filter(|s| s.depth < depth).map(|s| {
         format!(
             "{}{} {} {}-{}",
@@ -114,5 +121,10 @@ fn render(path: &str, o: Option<&Outline>, depth: usize, out: &Out) -> Vec<Strin
             s.end_line
         )
     }));
+    if hidden > 0 && folded {
+        v.push(format!(
+            "  … {hidden} nested (--depth N, or acus show {path}#key::sub)"
+        ));
+    }
     v
 }

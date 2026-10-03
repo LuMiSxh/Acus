@@ -1,6 +1,6 @@
 use crate::parse::{Block, Dest};
 use crate::{Chunk, Op};
-use acus_syntax::{Lang, Resolve, outline, resolve};
+use acus_syntax::{Lang, Resolve, attached_start, outline, resolve};
 use anyhow::{Context, Result, anyhow, bail};
 use regex::{Captures, Regex};
 use std::collections::BTreeMap;
@@ -269,6 +269,11 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
             symbol,
             lines: body,
         } => {
+            if body.is_empty() {
+                bail!(
+                    "{path}#{symbol}: Replace Symbol needs `+` lines\nhint: to remove it use `*** Delete Symbol: {path}#{symbol}`"
+                );
+            }
             let (start, end) = symbol_lines(files, path, symbol)?;
             let f = files.get(path)?;
             f.splice(start, end - start, body);
@@ -323,24 +328,8 @@ fn symbol_lines(files: &mut Files, path: &str, symbol: &str) -> Result<(usize, u
 }
 
 /// Grows a symbol's range upwards over the doc comments, attributes and decorators that belong to it.
-fn with_attached(lines: &[String], path: &str, mut start: usize, end: usize) -> (usize, usize) {
-    let hash = matches!(
-        Path::new(path).extension().and_then(|e| e.to_str()),
-        Some("py" | "toml" | "yaml" | "yml" | "sh")
-    );
-    let markdown = path.ends_with(".md");
-    while !markdown && start > 0 {
-        let l = lines[start - 1].trim_start();
-        let attached = ["///", "//", "#[", "#![", "@", "/*", "*"]
-            .iter()
-            .any(|p| l.starts_with(p))
-            || (hash && l.starts_with('#'));
-        if !attached {
-            break;
-        }
-        start -= 1;
-    }
-    (start, end)
+fn with_attached(lines: &[String], path: &str, start: usize, end: usize) -> (usize, usize) {
+    (attached_start(lines, path, start), end)
 }
 
 /// Adds one blank line next to a removed range so no double gap remains.
@@ -355,7 +344,23 @@ fn with_blank(lines: &[String], start: usize, end: usize) -> (usize, usize) {
     }
 }
 
+/// Languages a symbol may move between; TS, JS and Svelte scripts mix freely.
+fn family(path: &str) -> Option<&'static str> {
+    Some(match Lang::from_path(Path::new(path))? {
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Svelte => "js",
+        l => l.name(),
+    })
+}
+
 fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result<Vec<Change>> {
+    let dest = match to {
+        Dest::Before { path, .. } | Dest::After { path, .. } | Dest::End { path } => path,
+    };
+    if let (Some(a), Some(b)) = (family(path), family(dest))
+        && a != b
+    {
+        bail!("{path}#{symbol}: cannot move {a} code into {dest} ({b})");
+    }
     let (start, end) = symbol_lines(files, path, symbol)?;
     if let Dest::Before { path: p, symbol: s } | Dest::After { path: p, symbol: s } = to
         && p == path
@@ -372,9 +377,6 @@ fn move_symbol(files: &mut Files, path: &str, symbol: &str, to: &Dest) -> Result
     let f = files.get(path)?;
     f.splice(s, e - s, &[]);
     f.dirty = true;
-    let dest = match to {
-        Dest::Before { path, .. } | Dest::After { path, .. } | Dest::End { path } => path,
-    };
     let mut created = false;
     let at = match to {
         Dest::Before { path, symbol } => {
@@ -723,21 +725,32 @@ fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<us
 /// Why the closest candidate failed, so the agent can fix the hunk without re-reading the file.
 fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
     let first = old[j].trim();
-    for i in (j..lines.len()).filter(|&i| lines[i].trim() == first) {
-        let start = i - j;
-        if let Some(k) = (0..old.len()).find(|&k| {
-            lines
-                .get(start + k)
-                .is_none_or(|l| l.trim() != old[k].trim())
-        }) {
-            let found = lines.get(start + k).map_or("end of file", |l| l.as_str());
-            return format!(
-                "hint: the first line matches at {}, but line {} is `{found}`, not `{}`",
-                i + 1,
-                start + k + 1,
-                old[k]
-            );
-        }
+    // Report the candidate that matches the longest run of lines, not just the first one.
+    let best = (j..lines.len())
+        .filter(|&i| lines[i].trim() == first)
+        .filter_map(|i| {
+            let start = i - j;
+            let k = (0..old.len()).find(|&k| {
+                lines
+                    .get(start + k)
+                    .is_none_or(|l| l.trim() != old[k].trim())
+            })?;
+            Some((k, i, start))
+        })
+        .max_by_key(|&(k, i, _)| (k, std::cmp::Reverse(i)));
+    if let Some((k, i, start)) = best {
+        let found = lines.get(start + k).map_or("end of file", |l| l.as_str());
+        let part = if !old[k].trim().is_empty() && found.trim().starts_with(old[k].trim()) {
+            " (lines must match whole, not just their start)"
+        } else {
+            ""
+        };
+        return format!(
+            "hint: {k} lines match from line {}, but line {} is `{found}`, not `{}`{part}",
+            i + 1,
+            start + k + 1,
+            old[k]
+        );
     }
     if let Some(i) = lines
         .iter()

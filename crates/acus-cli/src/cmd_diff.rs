@@ -80,7 +80,12 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     cmd.extend(rev);
     cmd.push("--");
     cmd.extend(paths.iter().map(String::as_str));
-    let mut files = parse(&git(&cmd)?);
+    let mut files = parse(&git(&cmd).map_err(|e| match rev {
+        Some(r) if format!("{e}").contains("revision") => anyhow::anyhow!(
+            "{e}\nhint: `{r}` is neither an existing path nor a revision; for a deleted file name a revision first: acus diff HEAD {r}"
+        ),
+        _ => e,
+    })?);
     if !a.staged && range.is_none() {
         let mut ls = vec!["ls-files", "--others", "--exclude-standard", "--"];
         ls.extend(paths.iter().map(String::as_str));
@@ -104,19 +109,23 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         }
     }
     if files.is_empty() {
+        if out.format != Format::Json {
+            eprintln!("(no changes)");
+        }
         return Ok(Outcome::Empty);
     }
 
+    // An empty revision reads the index.
     let show = |rev: &str, p: &str| git(&["show", &format!("{rev}:./{p}")]).ok();
     let rendered: Vec<_> = files
         .iter()
         .map(|f| {
             let modified = f.old.is_some() && f.new.is_some();
+            // Decorators and doc comments count as part of the symbol below them.
             let parse = |p: &Option<String>, src: Option<String>| {
-                p.as_deref()
-                    .and_then(|p| Lang::from_path(Path::new(p)))
-                    .zip(src)
-                    .and_then(|(l, s)| outline(l, &s))
+                let p = p.as_deref()?;
+                let s = src?;
+                Some(outline(Lang::from_path(Path::new(p))?, &s)?.with_attached(&s, p))
             };
             let new_src =
                 f.new
@@ -131,7 +140,11 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
                 .old
                 .as_deref()
                 .filter(|_| modified && f.lines.iter().any(|l| !l.0))
-                .and_then(|p| show(old_rev, p));
+                // Unstaged changes are relative to the index, not HEAD.
+                .and_then(|p| match (a.staged, rev) {
+                    (false, None) => show("", p),
+                    _ => show(old_rev, p),
+                });
             let (new_o, old_o) = (parse(&f.new, new_src), parse(&f.old, old_src));
             (f, groups(f, new_o.as_ref(), old_o.as_ref()))
         })

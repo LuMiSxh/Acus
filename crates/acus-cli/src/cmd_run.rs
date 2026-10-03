@@ -47,7 +47,18 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
         if out.format == Format::Json {
             argv.push("--json".into());
         } else {
-            println!("{}", out.header(&format!(">>> acus {}", args.join(" "))));
+            // Quote arguments with spaces so the echo can be pasted back.
+            let shown: Vec<_> = args
+                .iter()
+                .map(|a| {
+                    if a.is_empty() || a.contains(char::is_whitespace) {
+                        format!("\"{a}\"")
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            println!("{}", out.header(&format!(">>> acus {}", shown.join(" "))));
         }
         let res = Cli::try_parse_from(&argv)
             .map_err(|e| anyhow::anyhow!(e.render().to_string().trim().to_owned()))
@@ -57,11 +68,11 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
             Ok(Outcome::Found | Outcome::Exit(0)) => found = true,
             // A `ctx` command that failed counts as a failed entry.
             Ok(Outcome::Exit(_)) => failed = true,
-            Ok(Outcome::Empty) => {
-                if out.format != Format::Json {
-                    println!("(no results)");
-                }
-            }
+            // JSON output keeps one line per entry, so an empty result is `null`.
+            Ok(Outcome::Empty) => match out.format {
+                Format::Json => println!("null"),
+                _ => println!("(no results)"),
+            },
             Err(e) => {
                 failed = true;
                 let msg = format!("{e:#}");

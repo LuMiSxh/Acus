@@ -114,6 +114,11 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
 }
 
 fn main() -> ExitCode {
+    // `acus … | head` should end quietly like other CLI tools, not panic on a closed pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     match execute(Cli::parse(), false) {
         Ok(Outcome::Found) => ExitCode::SUCCESS,
         Ok(Outcome::Empty) => ExitCode::from(1),

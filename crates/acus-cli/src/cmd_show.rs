@@ -1,6 +1,6 @@
 use crate::Outcome;
 use crate::fmt::{Format, Out};
-use acus_syntax::{Address, Lang, Resolve, Target, outline, resolve};
+use acus_syntax::{Address, Lang, Resolve, Target, attached_start, outline, resolve};
 use anyhow::{Result, bail};
 
 #[derive(clap::Args)]
@@ -35,7 +35,13 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
                     bail!("no syntax support for {path}\nhint: use {path}:START-END");
                 };
                 match resolve(&o, q) {
-                    Resolve::Found(s) => (format!("{path}#{}", s.qual), s.start_line, s.end_line),
+                    // Decorators, attributes and doc comments belong to what is shown.
+                    Resolve::Found(s) => (
+                        format!("{path}#{}", s.qual),
+                        attached_start(&src.lines().collect::<Vec<_>>(), path, s.start_line - 1)
+                            + 1,
+                        s.end_line,
+                    ),
                     Resolve::Missing => {
                         bail!("no symbol `{q}` in {path}\nhint: acus outline {path}")
                     }
