@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+repository = "https://github.com/LuMiSxh/Acus"
+
+[workspace.dependencies]
+acus-walk = { path = "crates/acus-walk" }
+acus-syntax = { path = "crates/acus-syntax", default-features = false }
+acus-search = { path = "crates/acus-search" }
+anstyle = "1"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+globset = "0.4.20"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.33"
+insta = "1.49.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+tree-sitter = "0.27.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-md = "0.5.3"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-svelte-ng = "1.0.2"
+tree-sitter-swift = "0.7.3"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
