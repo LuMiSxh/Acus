@@ -48,7 +48,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
                 }
             }
         };
-        if start == 0 || start > lines.len().max(1) || start > end {
+        if addr.target != Target::Whole && (start == 0 || start > lines.len() || start > end) {
             bail!("{path} has {} lines", lines.len());
         }
         let widen = if addr.target == Target::Whole {
