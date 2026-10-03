@@ -63,6 +63,16 @@ fn globs_match_relative_to_root() {
 }
 
 #[test]
+fn bare_exclude_drops_directories_and_files_by_name() {
+    let d = tree();
+    let opts = WalkOpts {
+        exclude: vec!["sub".into(), "*.md".into()],
+        ..Default::default()
+    };
+    assert_eq!(collect(opts, d.path()), ["a.rs"]);
+}
+
+#[test]
 fn missing_root_is_an_error() {
     let opts = WalkOpts {
         roots: vec!["/definitely/not/here".into()],

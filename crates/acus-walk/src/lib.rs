@@ -43,21 +43,24 @@ pub fn walk<F: Fn(&Path) + Sync>(opts: &WalkOpts, visit: F) -> Result<()> {
             bail!("path not found: {}", display_path(r));
         }
     }
-    let keep = |p: &Path| {
-        // Globs see the path relative to its root; a file given as root is matched as-is.
-        let rel = roots
-            .iter()
-            .find_map(|r| p.strip_prefix(r).ok())
-            .filter(|r| !r.as_os_str().is_empty())
-            .unwrap_or(p);
-        include.as_ref().is_none_or(|s| s.is_match(rel))
-            && !exclude.as_ref().is_some_and(|s| s.is_match(rel))
+    let keep = {
+        let roots = roots.clone();
+        move |p: &Path| include.as_ref().is_none_or(|s| s.is_match(rel(&roots, p)))
     };
     let mut b = WalkBuilder::new(&roots[0]);
     for r in &roots[1..] {
         b.add(r);
     }
     b.hidden(!opts.hidden).require_git(false);
+    if let Some(ex) = exclude {
+        // Like rg: `!dist` drops any file or directory named `dist`, `!src/gen` that path;
+        // excluded directories are not descended into.
+        let roots = roots.clone();
+        b.filter_entry(move |e| {
+            let r = rel(&roots, e.path());
+            !(ex.is_match(r) || r.file_name().is_some_and(|n| ex.is_match(n)))
+        });
+    }
     b.build_parallel().run(|| {
         let (keep, visit) = (&keep, &visit);
         Box::new(move |entry| {
@@ -72,6 +75,15 @@ pub fn walk<F: Fn(&Path) + Sync>(opts: &WalkOpts, visit: F) -> Result<()> {
         })
     });
     Ok(())
+}
+
+/// Globs see the path relative to its root; a file given as root is matched as-is.
+fn rel<'a>(roots: &[PathBuf], p: &'a Path) -> &'a Path {
+    roots
+        .iter()
+        .find_map(|r| p.strip_prefix(r).ok())
+        .filter(|r| !r.as_os_str().is_empty())
+        .unwrap_or(p)
 }
 
 /// How every acus output prints a path: `/`-separated, without a leading `./`.
