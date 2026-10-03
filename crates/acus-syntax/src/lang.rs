@@ -53,7 +53,8 @@ impl Lang {
     }
 
     /// The grammar, or `None` when its Cargo feature is disabled.
-    #[allow(unreachable_patterns)] // the `_` arm is live only when a language feature is off
+    // The `_` arm is live only when a language feature is off; with none, every arm diverges.
+    #[allow(unreachable_patterns, unreachable_code)]
     pub(crate) fn grammar(self) -> Option<tree_sitter::Language> {
         Some(match self {
             #[cfg(feature = "lang-rust")]
