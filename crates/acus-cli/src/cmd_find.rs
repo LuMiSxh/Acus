@@ -25,6 +25,10 @@ pub struct Args {
     /// Print enclosing symbol bodies instead of single lines.
     #[arg(long)]
     block: bool,
+    /// grep-style context (-A/-B/-C N): prints the enclosing symbol like --block.
+    // ponytail: N is ignored; the symbol body is the context agents want from grep -A.
+    #[arg(short = 'C', short_aliases = ['A', 'B'], value_name = "N", hide = true)]
+    context: Option<usize>,
     #[arg(long, default_value_t = 50)]
     max_hits: usize,
     /// Per printed block.
@@ -80,7 +84,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     }
     match out.format {
         Format::Json => print_json(&shown, rest),
-        _ if a.block => print_blocks(&shown, out, a.max_lines),
+        _ if a.block || a.context.is_some() => print_blocks(&shown, out, a.max_lines),
         _ => print_lines(&shown, out),
     }
     if rest > 0 && out.format != Format::Json {

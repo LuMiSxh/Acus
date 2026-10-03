@@ -40,6 +40,13 @@ fn find_block() {
 }
 
 #[test]
+fn grep_context_flags_mean_block() {
+    let block = acus(&["find", "needle", "--block", "-g", "*.rs"]).1;
+    assert_eq!(acus(&["find", "needle", "-A5", "-g", "*.rs"]).1, block);
+    assert_eq!(acus(&["find", "needle", "-C", "3", "-g", "*.rs"]).1, block);
+}
+
+#[test]
 fn find_json() {
     insta::assert_snapshot!(acus(&["find", "-e", "greet", "-e", "Usage", "--json"]).1);
 }
