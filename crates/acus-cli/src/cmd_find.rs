@@ -1,0 +1,180 @@
+use crate::Outcome;
+use crate::fmt::{Format, Out, hit_text};
+use acus_search::{FileHits, FindOpts, find};
+use acus_syntax::Symbol;
+use acus_walk::WalkOpts;
+use anyhow::{Result, bail};
+use std::collections::BTreeSet;
+
+#[derive(clap::Args)]
+pub struct Args {
+    /// Pattern, then paths (like rg). With -e, all positionals are paths.
+    positional: Vec<String>,
+    /// Pattern (repeatable).
+    #[arg(short = 'e', long = "regexp")]
+    patterns: Vec<String>,
+    /// Include glob; prefix with ! to exclude (repeatable).
+    #[arg(short = 'g', long = "glob")]
+    globs: Vec<String>,
+    #[arg(short = 'i', long)]
+    ignore_case: bool,
+    #[arg(short = 'F', long)]
+    fixed_strings: bool,
+    #[arg(long)]
+    hidden: bool,
+    /// Print enclosing symbol bodies instead of single lines.
+    #[arg(long)]
+    block: bool,
+    #[arg(long, default_value_t = 50)]
+    max_hits: usize,
+    /// Per printed block.
+    #[arg(long, default_value_t = 80)]
+    max_lines: usize,
+    /// Skip tree-sitter (faster, no symbols).
+    #[arg(long)]
+    no_syntax: bool,
+}
+
+pub fn run(a: Args, out: &Out) -> Result<Outcome> {
+    let mut positional = a.positional.into_iter();
+    let patterns = if a.patterns.is_empty() {
+        positional.next().into_iter().collect()
+    } else {
+        a.patterns
+    };
+    if patterns.is_empty() {
+        bail!("no pattern given\nhint: acus find PATTERN [PATH...] or -e PAT -e PAT");
+    }
+    let (exclude, include): (Vec<String>, Vec<String>) =
+        a.globs.into_iter().partition(|g| g.starts_with('!'));
+    let opts = FindOpts {
+        patterns,
+        walk: WalkOpts {
+            roots: positional.map(Into::into).collect(),
+            include,
+            exclude: exclude.into_iter().map(|g| g[1..].to_owned()).collect(),
+            hidden: a.hidden,
+        },
+        ignore_case: a.ignore_case,
+        fixed: a.fixed_strings,
+        syntax: !a.no_syntax,
+    };
+    let files = find(&opts)?;
+    if files.is_empty() {
+        return Ok(Outcome::Empty);
+    }
+    // Spend the hit budget in path order.
+    let mut budget = a.max_hits;
+    let mut shown = Vec::new();
+    let (mut rest, mut rest_files) = (0, 0);
+    for f in &files {
+        let n = f.hits.len().min(budget);
+        budget -= n;
+        if n > 0 {
+            shown.push((f, n));
+        }
+        if n < f.hits.len() {
+            rest += f.hits.len() - n;
+            rest_files += 1;
+        }
+    }
+    match out.format {
+        Format::Json => print_json(&shown, rest),
+        _ if a.block => print_blocks(&shown, out, a.max_lines),
+        _ => print_lines(&shown, out),
+    }
+    if rest > 0 && out.format != Format::Json {
+        println!(
+            "… {rest} more hits in {rest_files} files (narrow with -g/-e or raise --max-hits)"
+        );
+    }
+    Ok(Outcome::Found)
+}
+
+fn sym(f: &FileHits, line: usize) -> Option<&Symbol> {
+    f.outline.as_ref()?.enclosing(line)
+}
+
+fn print_lines(shown: &[(&FileHits, usize)], out: &Out) {
+    for (f, n) in shown {
+        println!("{}", out.header(&f.path));
+        let mut last = None;
+        for h in &f.hits[..*n] {
+            let s = sym(f, h.line);
+            let q = s.map(|s| s.qual.as_str());
+            if q != last
+                && let Some(s) = s
+            {
+                println!(
+                    "{}",
+                    out.dim(&format!("@{} {}-{}", s.qual, s.start_line, s.end_line))
+                );
+            }
+            last = q;
+            println!("{}\t{}", h.line, hit_text(&h.text));
+        }
+    }
+}
+
+fn print_blocks(shown: &[(&FileHits, usize)], out: &Out, max_lines: usize) {
+    for (f, n) in shown {
+        let lines: Vec<&str> = f.source.lines().collect();
+        let hit_lines: BTreeSet<usize> = f.hits[..*n].iter().map(|h| h.line).collect();
+        let mut done = BTreeSet::new();
+        for &l in &hit_lines {
+            let (title, a, b) = match sym(f, l) {
+                Some(s) => (
+                    format!("== {}#{} {}-{}", f.path, s.qual, s.start_line, s.end_line),
+                    s.start_line,
+                    s.end_line,
+                ),
+                // No symbol: the hit with two lines of context.
+                None => (
+                    format!("== {}:{l}", f.path),
+                    l.saturating_sub(2).max(1),
+                    (l + 2).min(lines.len()),
+                ),
+            };
+            if !done.insert((a, b)) {
+                continue;
+            }
+            println!("{}", out.header(&title));
+            let end = b.min(a + max_lines.max(1) - 1);
+            for i in a..=end {
+                let line = lines.get(i - 1).copied().unwrap_or("");
+                println!("{}", out.numbered(i, line, hit_lines.contains(&i)));
+            }
+            if end < b {
+                println!(
+                    "… {} more lines (acus show {}:{}-{b})",
+                    b - end,
+                    f.path,
+                    end + 1
+                );
+            }
+        }
+    }
+}
+
+fn print_json(shown: &[(&FileHits, usize)], rest: usize) {
+    let files: Vec<_> = shown
+        .iter()
+        .map(|(f, n)| {
+            let hits: Vec<_> = f.hits[..*n]
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "line": h.line,
+                        "text": h.text,
+                        "symbol": sym(f, h.line).map(|s| &s.qual),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "path": f.path, "lang": f.lang, "hits": hits })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({ "files": files, "truncated": rest })
+    );
+}

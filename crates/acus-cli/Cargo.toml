@@ -1,0 +1,33 @@
+[package]
+name = "acus-cli"
+description = "acus: agent-first code search, outline and editing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "acus"
+path = "src/main.rs"
+
+[features]
+default = ["lang-rust", "lang-swift", "lang-ts", "lang-python", "lang-markdown", "lang-svelte", "lang-data"]
+lang-rust = ["acus-syntax/lang-rust"]
+lang-swift = ["acus-syntax/lang-swift"]
+lang-ts = ["acus-syntax/lang-ts"]
+lang-python = ["acus-syntax/lang-python"]
+lang-markdown = ["acus-syntax/lang-markdown"]
+lang-svelte = ["acus-syntax/lang-svelte"]
+lang-data = ["acus-syntax/lang-data"]
+
+[dependencies]
+acus-search.workspace = true
+acus-syntax.workspace = true
+acus-walk.workspace = true
+anstyle.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
