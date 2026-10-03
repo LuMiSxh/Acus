@@ -1,5 +1,6 @@
 use acus_syntax::{Lang, outline};
 
+#[allow(dead_code)] // unused when every language feature is off
 fn rows(lang: Lang, src: &str) -> Vec<String> {
     outline(lang, src)
         .unwrap()
