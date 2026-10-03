@@ -18,6 +18,7 @@ acus-usage = { path = "crates/acus-usage" }
 acus-decide = { path = "crates/acus-decide" }
 anstyle = "1"
 anyhow = "1.0.104"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 clap = { version = "4.6.7", features = ["derive"] }
 globset = "0.4.20"
 grep-regex = "0.1.14"
