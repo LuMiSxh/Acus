@@ -73,6 +73,13 @@ fn parses_answers_including_workers_ai_wrapper() {
     )
     .unwrap();
     assert_eq!(s.value, "high");
+    // Real OpenRouter response shape: fractional score plus legend and probabilities.
+    let s = parse_answer(
+        &json!({"answers": {"q": {"type": "score", "score": 0.6, "legend": {"0": "low", "1": "high"}, "confidence": 0.55}}}),
+        &levels,
+    )
+    .unwrap();
+    assert_eq!(s.value, "high");
     assert!(
         parse_answer(&json!({"error": "bad key"}), &Question::YesNo)
             .unwrap_err()

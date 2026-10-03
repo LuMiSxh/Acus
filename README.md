@@ -68,9 +68,9 @@ disabled = ["usage"]
 
 [decide]
 enabled = true
-url = "https://api.typesafe.ai/v1/systemone"
-model = "jev-latest"
-api_key_env = "TYPESAFE_API_KEY"
+url = "https://openrouter.ai/api/alpha/decisions"   # or https://api.typesafe.ai/v1/systemone
+model = "~typesafe/jev-latest"                      # TypeSafe directly: "jev-latest"
+api_key_env = "OPENROUTER_API_KEY"                  # TypeSafe directly: TYPESAFE_API_KEY
 ```
 
 Environment overrides: `ACUS_DISABLE=usage,decide`, `ACUS_DECIDE_ENABLED`, `ACUS_DECIDE_URL`,

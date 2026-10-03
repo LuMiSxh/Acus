@@ -99,12 +99,12 @@ pub fn parse_answer(resp: &Value, q: &Question) -> Result<Answer> {
             let s = a
                 .get("score")
                 .ok_or_else(|| anyhow!("answer without `score`: {a}"))?;
-            // ponytail: the docs show neither form for certain; accept a level index or a label.
-            let value = match s.as_u64() {
-                Some(i) => levels
-                    .get(i as usize)
+            // Jev returns the expected level index as a float (`1.99`); a label is accepted too.
+            let value = match s.as_f64() {
+                Some(f) => levels
+                    .get(f.round() as usize)
                     .cloned()
-                    .unwrap_or_else(|| i.to_string()),
+                    .unwrap_or_else(|| f.to_string()),
                 None => s.as_str().map_or_else(|| s.to_string(), str::to_owned),
             };
             Answer {
