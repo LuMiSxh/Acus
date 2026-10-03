@@ -52,10 +52,10 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
-| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes and passing tests, and shows the code behind every `path:line` in its output |
+| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
-| `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts |
+| `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough.
@@ -115,7 +115,7 @@ fn ${1}_new(
 
 SEARCH/REPLACE blocks are the format Aider made popular and can stand in for `-`/`+` lines inside any `Update File`. `Replace All` changes every occurrence in the given files, directories and globs, and fails if a block matches nowhere. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
 
-Nothing is written unless every hunk applies. Files are replaced atomically. `--check` only validates.
+Nothing is written unless every hunk applies. Files are replaced atomically. `--check` only validates. `--fmt` (or `[patch] fmt = true`) runs each written file through its formatter if one is installed (rustfmt with the crate's edition, ruff or black, the project's prettier, swift-format, gofmt) and prints the formatted lines, so line numbers and context stay true for the next patch.
 
 ## Numbers
 
@@ -152,6 +152,9 @@ disabled = ["usage"]
 
 [ctx]
 drop = ["^warning: unused"]                         # extra output lines acus ctx hides
+
+[patch]
+fmt = true                                          # as if every patch had --fmt
 
 [decide]
 enabled = true

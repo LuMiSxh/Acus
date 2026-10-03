@@ -60,6 +60,14 @@ pub enum Resolve<'a> {
 
 /// Exact qualified name first, then a unique `::`-suffix or plain name.
 pub fn resolve<'a>(o: &'a Outline, query: &str) -> Resolve<'a> {
+    match resolve_as(o, query) {
+        // `Class.method` as written in Python, TS or Swift; keys like `a.b` match first.
+        Resolve::Missing if query.contains('.') => resolve_as(o, &query.replace('.', "::")),
+        r => r,
+    }
+}
+
+fn resolve_as<'a>(o: &'a Outline, query: &str) -> Resolve<'a> {
     let suffix = format!("::{query}");
     let exact: Vec<&Symbol> = o.symbols.iter().filter(|s| s.qual == query).collect();
     let hits = if exact.is_empty() {

@@ -3,11 +3,14 @@
 
 mod claude;
 mod codex;
+mod tools;
+
+pub use tools::group;
 
 use acus_walk::{WalkOpts, walk};
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -119,6 +122,9 @@ pub struct Report {
     pub sessions: Vec<Session>,
     pub tools: Vec<ToolStat>,
     pub chains: Chains,
+    /// Tool-call categories → calls per agent `[claude, codex]`.
+    #[serde(skip)]
+    pub categories: BTreeMap<&'static str, [u64; 2]>,
 }
 
 /// What one transcript file contributes.
@@ -134,6 +140,8 @@ pub(crate) struct FileStats {
     /// (tool name, input chars, is search/read)
     pub calls: Vec<(String, u64, bool)>,
     pub results: HashMap<String, u64>,
+    /// Category hits per tool call, see `tools::classify`.
+    pub categories: Vec<&'static str>,
 }
 
 /// Shell commands whose first real step only searches or reads (`cd x && rg …` counts).
@@ -249,6 +257,9 @@ fn merge(files: Vec<FileStats>) -> Report {
             });
         if s.project.is_empty() {
             s.project = project;
+        }
+        for c in &f.categories {
+            r.categories.entry(c).or_default()[usize::from(f.agent == "codex")] += 1;
         }
         for (id, model, t) in f.requests {
             if id.is_some_and(|id| !seen.insert(id)) {

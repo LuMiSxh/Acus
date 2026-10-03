@@ -104,6 +104,7 @@ pub(crate) fn parse(text: &str) -> FileStats {
                 if let Some(id) = p.call_id {
                     tool_of.insert(id.to_owned(), name.clone());
                 }
+                st.categories.extend(crate::tools::codex_tool(&name, input));
                 st.calls
                     .push((name, input.len() as u64, shell_explores(input)));
             }

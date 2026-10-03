@@ -111,6 +111,8 @@ pub(crate) fn parse(text: &str) -> FileStats {
                     if let Some(id) = b.id {
                         tool_of.insert(id.to_owned(), name.clone());
                     }
+                    st.categories
+                        .extend(crate::tools::claude_tool(&name, input));
                     st.calls.push((name, input.len() as u64, explore));
                 }
             }

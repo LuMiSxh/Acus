@@ -14,4 +14,4 @@ regex.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
-acus-syntax = { workspace = true, features = ["lang-rust"] }
+acus-syntax = { workspace = true, features = ["lang-rust", "lang-python"] }

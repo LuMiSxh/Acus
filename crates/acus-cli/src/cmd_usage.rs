@@ -1,6 +1,6 @@
 use crate::Outcome;
 use crate::fmt::{Format, Out};
-use acus_usage::{UsageOpts, WEIGHTS, report};
+use acus_usage::{Report, UsageOpts, WEIGHTS, group, report};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -21,6 +21,9 @@ pub struct Args {
     /// Codex sessions dir (default ~/.codex/sessions).
     #[arg(long)]
     codex_dir: Option<PathBuf>,
+    /// Count how agents search, read, edit and build (acus vs grep, sed, python, built-in tools).
+    #[arg(long)]
+    tools: bool,
 }
 
 /// 1234567 → "1.2M".
@@ -42,6 +45,9 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     })?;
     if r.sessions.is_empty() {
         return Ok(Outcome::Empty);
+    }
+    if a.tools {
+        return tools(&r, out);
     }
     if out.format == Format::Json {
         println!("{}", serde_json::to_string(&r)?);
@@ -125,6 +131,51 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     let hidden = r.sessions.len().saturating_sub(a.top);
     if hidden > 0 {
         println!("… {hidden} more sessions (raise --top or filter with --project/--days)");
+    }
+    Ok(Outcome::Found)
+}
+
+fn tools(r: &Report, out: &Out) -> Result<Outcome> {
+    let mut rows: Vec<_> = r
+        .categories
+        .iter()
+        .map(|(c, n)| (group(c), *c, n[0], n[1]))
+        .collect();
+    rows.sort_by_key(|&(g, c, a, b)| (g, std::cmp::Reverse(a + b), c));
+    let group_total = |g| {
+        rows.iter()
+            .filter(|r| r.0 == g)
+            .map(|r| r.2 + r.3)
+            .sum::<u64>()
+            .max(1)
+    };
+    if out.format == Format::Json {
+        let v: Vec<_> = rows
+            .iter()
+            .map(|&(g, c, a, b)| {
+                serde_json::json!({
+                    "group": g, "category": c, "claude": a, "codex": b, "total": a + b,
+                    "share": (a + b) as f64 / group_total(g) as f64,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&v)?);
+        return Ok(Outcome::Found);
+    }
+    println!(
+        "tool usage: {} sessions; a call counts once per category it hits",
+        r.sessions.len()
+    );
+    println!(
+        "{}",
+        out.header("category claude codex total share-of-group")
+    );
+    for (g, c, a, b) in &rows {
+        println!(
+            "  {g}/{c} {a} {b} {} {:.0}%",
+            a + b,
+            100.0 * (a + b) as f64 / group_total(g) as f64
+        );
     }
     Ok(Outcome::Found)
 }
