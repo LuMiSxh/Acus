@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acus-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "acus-decide",
  "acus-edit",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "acus-decide"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "acus-edit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "acus-syntax",
  "acus-walk",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "acus-search"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "acus-syntax",
  "acus-walk",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "acus-syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "tree-sitter",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "acus-usage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "acus-walk",
  "anyhow",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "acus-walk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "globset",

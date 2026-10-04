@@ -80,6 +80,23 @@ skills:
 
 The built-in Explore agent cannot preload skills; a custom agent with the same role can.
 
+Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files and `sed -i`/`perl -i` edits, and the refusal names the acus command to use. Pipe filters (`cargo test | grep FAILED`), heredoc bodies and commands prefixed with `command ` pass. Hooks apply to subagents too:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "acus guard 2>/dev/null || true" }]
+      }
+    ]
+  }
+}
+```
+
+`|| true` lets every command through when acus is missing or `guard` is disabled in the configuration.
+
 **Codex.** Codex has no session hooks. Add a line to `~/.codex/AGENTS.md`:
 
 ```markdown
@@ -102,6 +119,7 @@ The hook runs in the same way on Windows, where Claude Code executes hooks with 
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
 | `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex |
+| `acus guard` | PreToolUse hook that refuses shell searches, reads and in-place edits of source files and names the acus command instead |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 

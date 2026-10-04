@@ -2,6 +2,7 @@ mod cmd_ctx;
 mod cmd_decide;
 mod cmd_diff;
 mod cmd_find;
+mod cmd_guard;
 mod cmd_outline;
 mod cmd_patch;
 mod cmd_run;
@@ -56,6 +57,8 @@ enum Cmd {
     Run(cmd_run::Args),
     /// Print the agent skill (for a SessionStart hook) or install it with `--install`.
     Skill(cmd_skill::Args),
+    /// Claude Code PreToolUse hook: refuses grep, cat, sed -n and sed -i on source files with the acus command to use.
+    Guard(cmd_guard::Args),
 }
 
 impl Cmd {
@@ -71,6 +74,7 @@ impl Cmd {
             Cmd::Ctx(_) => "ctx",
             Cmd::Diff(_) => "diff",
             Cmd::Skill(_) => "skill",
+            Cmd::Guard(_) => "guard",
         }
     }
 }
@@ -115,6 +119,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Ctx(a) => cmd_ctx::run(a, &out, &cfg),
         Cmd::Diff(a) => cmd_diff::run(a, &out),
         Cmd::Skill(a) => cmd_skill::run(a),
+        Cmd::Guard(a) => cmd_guard::run(a),
     }
 }
 

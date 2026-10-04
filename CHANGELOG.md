@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0]
+
+### Added
+
+- `acus guard`, a Claude Code PreToolUse hook for Bash. It refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files and `sed -i`/`perl -i` edits, and names the acus command to use instead. Pipe filters such as `git log | grep fix`, heredoc bodies and commands prefixed with `command ` pass.
+
 ## [0.2.0]
 
 First release with prebuilt binaries for macOS, Windows and Linux.
