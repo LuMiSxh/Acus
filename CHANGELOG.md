@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0]
+
+### Added
+
+- `acus guard` refuses builds and tests (cargo, swift, go, npm/pnpm/yarn/bun, tsc, pytest, xcodebuild and others) piped into `tail`, `head` or `grep`, and suggests `acus ctx` with the same command.
+- `acus guard` handles the Read tool: a Read without `offset`/`limit` of a source or Markdown file over 300 lines is refused with the file's outline. Add `Read` to the hook matcher (`"Bash|Read"`).
+- `acus ctx` saves the full output to a temp file when it cuts or drops lines, and prints the path, so more of the output can be read without running the command again.
+
 ## [0.3.1]
 
 ### Added
