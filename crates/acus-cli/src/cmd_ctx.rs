@@ -80,9 +80,14 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         quiet(&all, &extra)
     };
     let half = a.max_output.max(2) / 2;
-    if lines.len() > half * 2 {
+    let omitted = lines.len().saturating_sub(half * 2);
+    // Whatever is not printed stays readable without running the command again.
+    let log = (omitted > 0 || dropped > 0)
+        .then(|| save_log(&cwd, &a.command, &text))
+        .flatten();
+    if omitted > 0 {
         lines[..half].iter().for_each(|l| println!("{l}"));
-        println!("… {} output lines omitted", lines.len() - half * 2);
+        println!("… {omitted} output lines omitted");
         lines[lines.len() - half..]
             .iter()
             .for_each(|l| println!("{l}"));
@@ -99,6 +104,16 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
             "{}",
             out.dim(&format!(
                 "… {dropped} noise lines dropped{tests} (--raw keeps them)"
+            ))
+        );
+    }
+    if let Some(log) = &log {
+        let p = log.display();
+        let n = text.lines().count();
+        println!(
+            "{}",
+            out.dim(&format!(
+                "… full output ({n} lines): acus find 'PAT' {p}, or acus show {p}:A-B"
             ))
         );
     }
@@ -199,6 +214,19 @@ static PY_LIB_FRAME: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static NOISE_SET: LazyLock<RegexSet> = LazyLock::new(|| RegexSet::new(NOISE).unwrap());
+
+/// Writes the full output to a temp file named after the directory and command, so a rerun
+/// replaces its previous log.
+fn save_log(cwd: &Path, command: &str, text: &str) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (cwd, command).hash(&mut h);
+    let dir = std::env::temp_dir().join("acus-ctx");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{:016x}.log", h.finish()));
+    std::fs::write(&path, text).ok()?;
+    Some(path)
+}
 
 /// The output as a terminal would show it: no colour codes, and only the final state of lines
 /// a progress bar redrew with `\r`.

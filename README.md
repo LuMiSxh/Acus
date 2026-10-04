@@ -80,14 +80,14 @@ skills:
 
 The built-in Explore agent cannot preload skills; a custom agent with the same role can.
 
-Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files and `sed -i`/`perl -i` edits, and the refusal names the acus command to use. Pipe filters (`cargo test | grep FAILED`), heredoc bodies and commands prefixed with `command ` pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic. Hooks apply to subagents too:
+Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files, `sed -i`/`perl -i` edits and builds or tests piped into `tail`/`head`/`grep` (`cargo test | tail`, which hides failures and leads to reruns), and the refusal names the acus command to use. Pipe filters on other output (`git log | grep fix`), heredoc bodies and commands prefixed with `command ` pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic. With `Read` in the matcher, a Read without `offset`/`limit` of a source or Markdown file over 300 lines is refused too, and the refusal carries the file's outline so the agent can pick symbols with `acus show`. Hooks apply to subagents too:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read",
         "hooks": [{ "type": "command", "command": "acus guard 2>/dev/null || true" }]
       }
     ]
@@ -113,13 +113,13 @@ The hook runs in the same way on Windows, where Claude Code executes hooks with 
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
-| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once |
+| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. When output is cut, the full log is saved to a temp file and its path printed |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
 | `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex |
-| `acus guard` | PreToolUse hook that refuses shell searches, reads and in-place edits of source files and names the acus command instead |
+| `acus guard` | PreToolUse hook that refuses shell searches, reads and in-place edits of source files, filtered builds and whole reads of large files, and names the acus command instead |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
