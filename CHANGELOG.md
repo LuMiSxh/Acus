@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1]
+
+### Added
+
+- `acus guard` recognises Python, Node and Ruby scripts (heredoc, `-c`, `-e`) that read a source file, replace text and write it back. They still run, but the agent gets a hint to use `acus patch` next time.
+
 ## [0.3.0]
 
 ### Added
