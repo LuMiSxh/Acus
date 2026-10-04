@@ -1,10 +1,13 @@
 //! PreToolUse hook for Claude Code: refuses shell searches, reads and in-place edits of source
-//! files that acus does in one call, and tells the agent which acus command to use instead.
+//! files that acus does in one call, builds piped into a filter, and whole reads of large source
+//! files, and tells the agent which acus command to use instead.
 
 use crate::Outcome;
+use acus_syntax::{Lang, outline};
 use anyhow::Result;
 use regex::Regex;
 use std::io::Read;
+use std::path::Path;
 use std::sync::LazyLock;
 
 #[derive(clap::Args)]
@@ -14,7 +17,12 @@ pub fn run(_: Args) -> Result<Outcome> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
-    let out = match check(v["tool_input"]["command"].as_str().unwrap_or_default()) {
+    let input = &v["tool_input"];
+    let verdict = match v["tool_name"].as_str() {
+        Some("Read") => read_check(input, v["cwd"].as_str()),
+        _ => check(input["command"].as_str().unwrap_or_default()),
+    };
+    let out = match verdict {
         Some(Verdict::Deny(reason)) => serde_json::json!({ "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -47,6 +55,60 @@ const CODE: &[&str] = &[
     "kt", "rb", "sh", "zsh", "css", "scss", "html", "lua", "cs", "sql",
 ];
 
+/// Source files longer than this are not read whole without a reason.
+const READ_MAX: usize = 300;
+/// Symbols listed when such a read is refused.
+const OUTLINE_MAX: usize = 60;
+
+/// A whole read of a large source file: refused with the file's outline, so the agent can pick
+/// symbols or a range instead.
+fn read_check(input: &serde_json::Value, cwd: Option<&str>) -> Option<Verdict> {
+    if ["offset", "limit", "pages"]
+        .iter()
+        .any(|k| !input[k].is_null())
+    {
+        return None;
+    }
+    let path = Path::new(input["file_path"].as_str()?);
+    // Data files are mostly read whole on purpose; their outline says little.
+    let lang =
+        Lang::from_path(path).filter(|l| !matches!(l, Lang::Toml | Lang::Json | Lang::Yaml))?;
+    let src = std::fs::read_to_string(path).ok()?;
+    let shown = cwd
+        .and_then(|c| path.strip_prefix(c).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    read_verdict(&shown, lang, &src)
+}
+
+fn read_verdict(path: &str, lang: Lang, src: &str) -> Option<Verdict> {
+    let lines = src.lines().count();
+    if lines <= READ_MAX {
+        return None;
+    }
+    let o = outline(lang, src)?;
+    let mut syms: Vec<String> = o
+        .symbols
+        .iter()
+        .filter(|s| s.depth < 2)
+        .map(|s| {
+            let name = s.detail.as_deref().unwrap_or(&s.name);
+            let indent = "  ".repeat(s.depth);
+            format!("{indent}{} {name} {}-{}", s.kind, s.start_line, s.end_line)
+        })
+        .collect();
+    if syms.len() > OUTLINE_MAX {
+        let more = syms.len() - OUTLINE_MAX;
+        syms.truncate(OUTLINE_MAX);
+        syms.push(format!("… {more} more (acus outline {path})"));
+    }
+    Some(Verdict::Deny(format!(
+        "{path} has {lines} lines. Read only what you need: `acus show {path}#Symbol {path}:A-B` reads several symbols and ranges in one call, or Read with offset and limit. Only if you need the whole file, Read it with limit: {lines}.\nOutline of {path}:\n{}",
+        syms.join("\n")
+    )))
+}
+
 /// What to do with `cmd`: refusing wins over hinting, `None` lets it run.
 fn check(cmd: &str) -> Option<Verdict> {
     let (rest, docs) = strip_heredocs(cmd);
@@ -58,9 +120,14 @@ fn check(cmd: &str) -> Option<Verdict> {
         })?;
         is_edit_script(body).then(|| script_hint(&interp))
     });
-    let verdicts: Vec<Verdict> = segments(&rest)
-        .into_iter()
-        .filter_map(|(seg, piped)| rule(&seg, piped))
+    let segs = segments(&rest);
+    let filtered = segs
+        .windows(2)
+        .filter_map(|w| filtered_build(&w[0].0, &w[1]));
+    let verdicts: Vec<Verdict> = segs
+        .iter()
+        .filter_map(|(seg, piped)| rule(seg, *piped))
+        .chain(filtered)
         .chain(scripts)
         .collect();
     let deny = verdicts.iter().position(|v| matches!(v, Verdict::Deny(_)));
@@ -92,6 +159,47 @@ fn is_edit_script(s: &str) -> bool {
         && CODE_PATH.is_match(s)
 }
 
+/// A build or test piped into `tail`, `head` or `grep`: the cut output often hides the failure,
+/// and the build runs again to see more.
+fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> {
+    let (filter, _) = head(next).filter(|_| *piped)?;
+    if !matches!(filter, "tail" | "head" | "grep" | "egrep" | "rg") {
+        return None;
+    }
+    let (build, args) = head(seg)?;
+    let sub = args
+        .filter(|a| !a.starts_with(['-', '+']))
+        .find(|a| *a != "run");
+    let is_build = match build {
+        "cargo" => sub.is_some_and(|s| {
+            matches!(
+                s,
+                "test" | "build" | "check" | "clippy" | "nextest" | "t" | "b" | "c"
+            )
+        }),
+        "swift" => sub.is_some_and(|s| matches!(s, "build" | "test")),
+        "go" => sub.is_some_and(|s| matches!(s, "build" | "test" | "vet")),
+        "npm" | "pnpm" | "yarn" | "bun" => sub.is_some_and(|s| {
+            s.starts_with("test") || s.starts_with("build") || s.contains("check") || s == "lint"
+        }),
+        "xcodebuild" | "pytest" | "tsc" | "vitest" | "jest" | "mypy" | "make" | "gradle"
+        | "gradlew" | "mvn" | "dotnet" => true,
+        _ => false,
+    };
+    if !is_build {
+        return None;
+    }
+    let cmd = seg.trim().trim_end_matches("2>&1").trim_end();
+    let example = if cmd.contains('\'') {
+        "acus ctx 'COMMAND'".to_owned()
+    } else {
+        format!("acus ctx '{cmd}'")
+    };
+    Some(Verdict::Deny(format!(
+        "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again. {ESCAPE}"
+    )))
+}
+
 /// Edit scripts are only hinted at: telling them apart from data processing is a heuristic.
 fn script_hint(interp: &str) -> Verdict {
     Verdict::Hint(format!(
@@ -105,7 +213,7 @@ fn head(seg: &str) -> Option<(&str, impl Iterator<Item = &str>)> {
         is_assignment(w) || matches!(*w, "do" | "then" | "else" | "{" | "!" | "time" | "sudo")
     });
     let mut head = words.next()?.rsplit('/').next()?;
-    if matches!(head, "uv" | "env" | "exec") {
+    if matches!(head, "uv" | "env" | "exec" | "npx" | "bunx") {
         // `uv run python …` runs the interpreter.
         head = words
             .by_ref()
@@ -234,7 +342,8 @@ fn segments(cmd: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, check};
+    use super::{READ_MAX, Verdict, check, read_verdict};
+    use acus_syntax::Lang;
 
     #[test]
     fn refuses_file_searches_reads_and_in_place_edits() {
@@ -249,6 +358,11 @@ mod tests {
             "cat src/a.rs src/b.rs",
             "X=1 head -50 README.md",
             "python3 - <<'EOF'\nopen('a.rs','w').write(s.replace('a','b'))\nEOF\ngrep -n x a.rs",
+            "cargo test 2>&1 | grep -E 'FAILED|panicked'",
+            "cd crates && cargo test -q -p acus-cli | tail -30",
+            "swift build 2>&1 | head -50",
+            "npx tsc --noEmit | head",
+            "pnpm run build | tail -20",
         ] {
             assert!(matches!(check(cmd), Some(Verdict::Deny(_))), "{cmd}");
         }
@@ -270,7 +384,10 @@ mod tests {
     fn allows_filters_data_and_escapes() {
         for cmd in [
             "git log --oneline | grep fix",
-            "cargo test 2>&1 | grep -E 'FAILED|panicked'",
+            "cargo tree | grep serde",
+            "cargo test 2>&1 | tee test.log",
+            "acus ctx 'cargo test | tail'",
+            "npm install | tail -3",
             "git commit -m \"fix; grep foo\"",
             "command grep -rn foo src",
             "cat > notes.md <<'EOF'\ngrep foo bar\nEOF",
@@ -287,5 +404,21 @@ mod tests {
         ] {
             assert_eq!(check(cmd), None, "{cmd}");
         }
+    }
+
+    #[test]
+    fn refuses_whole_reads_of_large_sources_with_their_outline() {
+        let small: String = (0..READ_MAX).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        assert_eq!(read_verdict("src/a.rs", Lang::Rust, &small), None);
+        let large = format!("{small}fn last() {{}}\n");
+        let Some(Verdict::Deny(reason)) = read_verdict("src/a.rs", Lang::Rust, &large) else {
+            panic!("large file read whole");
+        };
+        assert!(reason.contains("src/a.rs has 301 lines"), "{reason}");
+        assert!(
+            reason.contains("… 241 more (acus outline src/a.rs)"),
+            "{reason}"
+        );
+        assert!(reason.contains("fn f0 1-1"), "{reason}");
     }
 }
