@@ -50,10 +50,17 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         bail!("no decide endpoint configured\nhint: set ACUS_DECIDE_URL or [decide] url in {path}");
     };
     let key_env = d.api_key_env.as_deref().unwrap_or("TYPESAFE_API_KEY");
+    let Some(api_key) = std::env::var(key_env).ok().filter(|k| !k.trim().is_empty()) else {
+        // Exit 2, not 1: a missing key must not read as a "no" answer in scripts.
+        eprintln!(
+            "warning: no API key in ${key_env}, decide not used\nhint: export {key_env}, or set [decide] api_key_env in {path}"
+        );
+        return Ok(Outcome::Exit(2));
+    };
     let ep = Endpoint {
         url,
         model: d.model.clone().unwrap_or_else(|| "jev-latest".into()),
-        api_key: std::env::var(key_env).ok(),
+        api_key: Some(api_key),
     };
     let state = match (a.state, a.state_file) {
         (Some(s), _) => s,

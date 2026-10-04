@@ -220,6 +220,34 @@ fn decide_without_endpoint_has_hint() {
     assert!(err.contains("ACUS_DECIDE_URL"), "{err}");
 }
 
+#[cfg(feature = "cmd-decide")]
+#[test]
+fn decide_without_key_warns_and_skips() {
+    let env = [
+        ("ACUS_DECIDE_URL", "http://127.0.0.1:9"),
+        ("ACUS_DECIDE_API_KEY_ENV", "ACUS_TEST_UNSET_KEY"),
+    ];
+    let (code, _, err) = acus_env(&["decide", "ok?", "--state", "x"], &env);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("warning: no API key in $ACUS_TEST_UNSET_KEY"),
+        "{err}"
+    );
+}
+
+#[test]
+fn skill_prints_body_and_find_path_errors_skip_regex_hint() {
+    let (code, out, _) = acus(&["skill"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("# acus"), "{out}");
+    let (code, _, err) = acus(&["find", "x", "no/such/dir"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("path not found") && !err.contains("hint: escape"),
+        "{err}"
+    );
+}
+
 #[test]
 fn run_survives_a_bad_line() {
     let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"));

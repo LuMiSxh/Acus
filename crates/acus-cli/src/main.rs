@@ -6,6 +6,7 @@ mod cmd_outline;
 mod cmd_patch;
 mod cmd_run;
 mod cmd_show;
+mod cmd_skill;
 mod cmd_usage;
 mod config;
 mod fmt;
@@ -53,6 +54,8 @@ enum Cmd {
     Diff(cmd_diff::Args),
     /// Run several commands from a JSON array of argument lists on stdin.
     Run(cmd_run::Args),
+    /// Print the agent skill (for a SessionStart hook) or install it with `--install`.
+    Skill(cmd_skill::Args),
 }
 
 impl Cmd {
@@ -67,6 +70,7 @@ impl Cmd {
             Cmd::Run(_) => "run",
             Cmd::Ctx(_) => "ctx",
             Cmd::Diff(_) => "diff",
+            Cmd::Skill(_) => "skill",
         }
     }
 }
@@ -110,6 +114,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Run(a) => cmd_run::run(a, &out),
         Cmd::Ctx(a) => cmd_ctx::run(a, &out, &cfg),
         Cmd::Diff(a) => cmd_diff::run(a, &out),
+        Cmd::Skill(a) => cmd_skill::run(a),
     }
 }
 
