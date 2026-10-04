@@ -28,21 +28,65 @@ Whenever output is cut short, the last line names the exact command that shows t
 
 ## Install
 
-Rust 1.88 or newer:
+macOS and Linux:
 
 ```sh
-cargo install --path crates/acus-cli
+curl -fsSL https://raw.githubusercontent.com/LuMiSxh/Acus/main/install.sh | sh
 ```
 
-`acus decide` is behind a feature flag, so add `--features cmd-decide` if you want it.
+Windows (PowerShell):
 
-To teach Claude Code and Codex when to reach for it, copy the skill:
+```powershell
+irm https://raw.githubusercontent.com/LuMiSxh/Acus/main/install.ps1 | iex
+```
+
+Both scripts download the latest release to `~/.local/bin` (`ACUS_INSTALL_DIR` changes that), add it to `PATH` and run `acus skill --install`, which writes the agent skill to `~/.claude/skills/acus/` and `~/.agents/skills/acus/`. Set `ACUS_NO_SKILL=1` to skip the skill. Release binaries include `acus decide`.
+
+From source, with Rust 1.88 or newer:
 
 ```sh
-mkdir -p ~/.claude/skills/acus ~/.agents/skills/acus
-cp skill/SKILL.md ~/.claude/skills/acus/
-cp skill/SKILL.md ~/.agents/skills/acus/
+cargo install --path crates/acus-cli --features cmd-decide
+acus skill --install
 ```
+
+Run `acus skill --install` again after each update so the skill matches the binary.
+
+## Agent setup
+
+An installed skill is only listed by its description, so agents often fall back to grep and cat. Load it into context instead.
+
+**Claude Code.** Add a SessionStart hook to `~/.claude/settings.json`. It prints the skill at every start, `/clear` and compaction:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [{ "type": "command", "command": "acus skill || true" }]
+      }
+    ]
+  }
+}
+```
+
+Subagents do not see SessionStart output. Preload the skill in each custom agent's frontmatter, and give read-only agents `Bash` so they can run it:
+
+```yaml
+tools: Read, Glob, Grep, Bash
+skills:
+  - acus
+```
+
+The built-in Explore agent cannot preload skills; a custom agent with the same role can.
+
+**Codex.** Codex has no session hooks. Add a line to `~/.codex/AGENTS.md`:
+
+```markdown
+Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 'PAT' --block`, `acus outline PATH`, `acus show path#Symbol path:A-B`), edit with one `acus patch`, and run builds and tests via `acus ctx 'COMMAND'`.
+```
+
+The hook runs in the same way on Windows, where Claude Code executes hooks with Git Bash.
 
 ## Commands
 
@@ -56,7 +100,8 @@ cp skill/SKILL.md ~/.agents/skills/acus/
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
-| `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API |
+| `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
+| `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
@@ -176,7 +221,7 @@ cargo test --workspace --all-features
 cargo bench -p acus-cli
 ```
 
-CI runs the same checks on Ubuntu and Windows.
+CI runs the same checks on Ubuntu and Windows. Releases are built by the `Release` workflow: bump the version in `Cargo.toml`, add a `CHANGELOG.md` section, merge, then run the workflow with the tag (`v0.2.0`). It builds macOS (arm64, x86_64), Windows (x86_64) and Linux (x86_64, arm64) archives with checksums.
 
 | Crate | Role |
 | --- | --- |

@@ -99,7 +99,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     };
     let files = find(&opts).map_err(|e| {
         let msg = format!("{e:#}");
-        if fixed {
+        if fixed || !msg.starts_with("invalid pattern") {
             e
         } else if msg.contains("look-around") {
             anyhow::anyhow!("{msg}\nhint: match the surrounding text directly, or narrow with -w / a second -e")
