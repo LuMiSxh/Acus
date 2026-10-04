@@ -80,7 +80,7 @@ skills:
 
 The built-in Explore agent cannot preload skills; a custom agent with the same role can.
 
-Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files and `sed -i`/`perl -i` edits, and the refusal names the acus command to use. Pipe filters (`cargo test | grep FAILED`), heredoc bodies and commands prefixed with `command ` pass. Hooks apply to subagents too:
+Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files and `sed -i`/`perl -i` edits, and the refusal names the acus command to use. Pipe filters (`cargo test | grep FAILED`), heredoc bodies and commands prefixed with `command ` pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic. Hooks apply to subagents too:
 
 ```json
 {
