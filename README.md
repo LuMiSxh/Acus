@@ -49,7 +49,7 @@ cargo install --path crates/acus-cli --features cmd-decide
 acus skill --install
 ```
 
-Run `acus skill --install` again after each update so the skill matches the binary. `acus skill --install --hooks` also sets up Claude Code (see below); on Windows this is the whole setup.
+`acus update` replaces the binary where it is installed with the latest release when that is newer (checked against the release's SHA-256), then reinstalls the skill so it matches the binary; `--check` only reports. After a source build, run `acus skill --install` yourself. `acus skill --install --hooks` also sets up Claude Code (see below); on Windows this is the whole setup.
 
 ## Agent setup
 
@@ -125,6 +125,7 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
 | `acus map [DIR]` | Directory tree with file and line counts within a token budget (`--budget 400`): the largest directories open first, chains like `a/b/c/` and single-file directories are rolled up, project roots are tagged, and small directories list their files' top-level symbols; tests and docs open last |
 | `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex, `--install --hooks` also registers the hooks |
+| `acus update` | Replaces the binary with the latest GitHub release when newer and reinstalls the skill; `--check` exits 0 when an update exists, 1 when current |
 | `acus guard` | PreToolUse hook for Bash, PowerShell, Read, Grep and Glob that refuses shell searches, reads and in-place edits of source files, filtered builds, whole reads of large files and Grep calls, and names the acus command instead |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.0]
+
+### Added
+
+- `acus update` replaces the binary in place with the latest GitHub release when it is newer, verified against the release's SHA-256, and reinstalls the skill; `--check` only reports, `--force` reinstalls. On by default as the `cmd-update` feature; it only goes online when called.
+
 ## [0.5.0]
 
 ### Added

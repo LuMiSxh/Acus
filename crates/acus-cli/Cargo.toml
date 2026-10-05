@@ -11,7 +11,7 @@ name = "acus"
 path = "src/main.rs"
 
 [features]
-default = ["lang-rust", "lang-swift", "lang-ts", "lang-python", "lang-markdown", "lang-svelte", "lang-data"]
+default = ["lang-rust", "lang-swift", "lang-ts", "lang-python", "lang-markdown", "lang-svelte", "lang-data", "cmd-update"]
 lang-rust = ["acus-syntax/lang-rust"]
 lang-swift = ["acus-syntax/lang-swift"]
 lang-ts = ["acus-syntax/lang-ts"]
@@ -21,6 +21,8 @@ lang-svelte = ["acus-syntax/lang-svelte"]
 lang-data = ["acus-syntax/lang-data"]
 # Network judgements via a Jev-compatible API; off by default.
 cmd-decide = ["dep:acus-decide"]
+# `acus update` from GitHub releases; network only when called.
+cmd-update = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:sha2"]
 
 [dependencies]
 acus-decide = { workspace = true, optional = true }
@@ -37,6 +39,11 @@ serde.workspace = true
 similar.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+flate2 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"

@@ -9,6 +9,7 @@ mod cmd_patch;
 mod cmd_run;
 mod cmd_show;
 mod cmd_skill;
+mod cmd_update;
 mod cmd_usage;
 mod config;
 mod fmt;
@@ -62,6 +63,8 @@ enum Cmd {
     Skill(cmd_skill::Args),
     /// Claude Code PreToolUse hook: refuses grep, cat, sed -n and sed -i on source files with the acus command to use.
     Guard(cmd_guard::Args),
+    /// Replace this binary with the latest GitHub release and reinstall the skill.
+    Update(cmd_update::Args),
 }
 
 impl Cmd {
@@ -79,6 +82,7 @@ impl Cmd {
             Cmd::Diff(_) => "diff",
             Cmd::Skill(_) => "skill",
             Cmd::Guard(_) => "guard",
+            Cmd::Update(_) => "update",
         }
     }
 }
@@ -125,6 +129,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Diff(a) => cmd_diff::run(a, &out),
         Cmd::Skill(a) => cmd_skill::run(a),
         Cmd::Guard(a) => cmd_guard::run(a, &cfg),
+        Cmd::Update(a) => cmd_update::run(a),
     }
 }
 
