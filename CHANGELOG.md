@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Empty diffs now exit successfully, and empty JSON results emit `null` consistently for direct commands and `run`.
+- Empty diffs now exit successfully; empty `find` and `diff` JSON results, including entries in `run --json`, emit `null`.
 
 ## [0.6.0]
 

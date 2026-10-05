@@ -334,6 +334,8 @@ fn run_batch() {
             "[{\"address\":\"src/lib.rs\",\"start\":1,\"end\":1,\"text\":\"pub struct Parser {\"}]\n"
         )
     );
+    let (code, out, err) = acus_in(dir, &["run", "--json"], r#"[["find","zzz_none"]]"#);
+    assert_eq!((code, out.as_str(), err.as_str()), (1, "null\n", ""));
 }
 
 #[test]

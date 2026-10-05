@@ -130,7 +130,7 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
-Exit codes are 0 for results or success, 1 for an empty result when that command treats emptiness as no match, and 2 for errors. In `--json` mode, empty outputs are `null`; `find` with no matches exits 1, while `diff` with no changes exits 0. Errors carry a `hint:` line. `ctx` passes on the exit code of the command it ran.
+Exit codes are 0 for results or success, 1 for an empty result when that command treats emptiness as no match, and 2 for errors. Empty `find` and `diff` results serialize as `null`; `run --json` emits one `null` per empty entry. `find` with no matches exits 1, while `diff` with no changes exits 0. Errors carry a `hint:` line. `ctx` passes on the exit code of the command it ran.
 
 Output defaults to a compact agent format. `--json` and `--human` are there for scripts and people.
 

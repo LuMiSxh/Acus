@@ -116,7 +116,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         );
     }
     let out = fmt::Out::new(cli.format());
-    match cli.cmd {
+    let result = match cli.cmd {
         Cmd::Find(a) => cmd_find::run(a, &out),
         Cmd::Outline(a) => cmd_outline::run(a, &out),
         Cmd::Map(a) => cmd_map::run(a),
@@ -131,7 +131,17 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Skill(a) => cmd_skill::run(a),
         Cmd::Guard(a) => cmd_guard::run(a, &cfg),
         Cmd::Update(a) => cmd_update::run(a),
+    }?;
+    if !nested
+        && out.format == Format::Json
+        && matches!(
+            (name, &result),
+            ("find", Outcome::Empty) | ("diff", Outcome::NoChanges)
+        )
+    {
+        println!("null");
     }
+    Ok(result)
 }
 
 fn main() -> ExitCode {
@@ -140,22 +150,9 @@ fn main() -> ExitCode {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cli = Cli::parse();
-    let json = matches!(cli.format(), Format::Json);
-    match execute(cli, false) {
-        Ok(Outcome::Found) => ExitCode::SUCCESS,
-        Ok(Outcome::Empty) => {
-            if json {
-                println!("null");
-            }
-            ExitCode::from(1)
-        }
-        Ok(Outcome::NoChanges) => {
-            if json {
-                println!("null");
-            }
-            ExitCode::SUCCESS
-        }
+    match execute(Cli::parse(), false) {
+        Ok(Outcome::Found | Outcome::NoChanges) => ExitCode::SUCCESS,
+        Ok(Outcome::Empty) => ExitCode::from(1),
         Ok(Outcome::Exit(c)) => ExitCode::from(c),
         Err(e) => {
             // Messages carry an optional second line `hint: …`.
