@@ -71,12 +71,9 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     } else {
         format!("exec 2>&1\n{command}")
     };
-    let res = if cfg!(windows) {
-        Command::new("cmd").args(["/C", &cmd]).output()
-    } else {
-        Command::new("sh").args(["-c", &cmd]).output()
-    }
-    .with_context(|| format!("cannot run `{command}`"))?;
+    let res = shell(&cmd)
+        .output()
+        .with_context(|| format!("cannot run `{command}`"))?;
     let raw = String::from_utf8_lossy(&res.stdout);
     let text = if a.raw { raw.to_string() } else { clean(&raw) };
     let code = res.status.code().unwrap_or(1);
@@ -174,6 +171,24 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         println!("… {more} more locations (--max-refs {})", a.max_refs + more);
     }
     Ok(Outcome::Exit(code.clamp(0, 255) as u8))
+}
+
+/// `sh -c`, or on Windows `cmd /S /C "…"` passed verbatim: Rust's argument quoting escapes `"`
+/// as `\"`, which cmd does not understand, and `/S` strips exactly the outer pair of quotes.
+fn shell(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.args(["/S", "/C"]).raw_arg(format!("\"{cmd}\""));
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    }
 }
 
 /// The test command of the nearest project root at or above `start`; one directory is checked

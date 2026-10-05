@@ -82,14 +82,15 @@ That adds:
 }
 ```
 
-The SessionStart hook prints the skill at every start, `/clear` and compaction. `acus skill --map` also prints a short map of the repository's source directories (inside a git checkout only, at most 40 lines), which saves the first exploring calls of a session for about a thousand tokens.
+The SessionStart hook prints the skill at every start, `/clear` and compaction. There is deliberately no project map in it: [overviews in context files did not help agents find the relevant files and raised cost](https://arxiv.org/abs/2602.11988). Agents call `acus map` when they need the layout instead.
 
 `acus guard` refuses what acus does better and names the acus command to use:
 
 - Bash: `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files, `sed -i`/`perl -i` edits, and builds or tests piped into `tail`/`head`/`grep` (`cargo test | tail` hides failures and leads to reruns). Pipe filters on other output (`git log | grep fix`) and heredoc bodies pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic.
 - PowerShell (Windows): the same rules for `Select-String`, `Get-Content`, `Select-Object -Last` after a build, and `-replace … | Set-Content` edits.
 - Read: without `offset`/`limit`, source and Markdown files over 300 lines; the refusal carries the file's outline so the agent can pick symbols with `acus show`.
-- Grep: refused with the equivalent `acus find` command; counts and multiline searches pass. Glob runs, with a hint at `acus outline`.
+- Grep: refused with the equivalent `acus find` command; counts and multiline searches pass. Glob runs, with a hint at `acus map` and `acus outline`.
+- Recursive listings (`tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`) run, with a hint at `acus map`.
 
 A refused shell command can run anyway with a `command ` prefix (Bash) or a trailing `# acus-skip` comment (both shells). Every decision, escapes included, is logged next to the config file; `acus usage --guard` counts them per rule and lists the escaped calls, which point at refusals acus could not replace. `|| true` lets every call through when acus is missing or `guard` is disabled in the configuration. Hooks apply to subagents too, and on Windows Claude Code runs them with Git Bash.
 
@@ -122,7 +123,8 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins); `--guard` counts `acus guard` decisions per rule |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
-| `acus skill` | Prints the bundled agent skill for a SessionStart hook (`--map` adds a project map); `--install` writes it for Claude Code and Codex, `--install --hooks` also registers the hooks |
+| `acus map [DIR]` | Directory tree with file and line counts within a token budget (`--budget 400`): the largest directories open first, chains like `a/b/c/` and single-file directories are rolled up, project roots are tagged, and small directories list their files' top-level symbols; tests and docs open last |
+| `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex, `--install --hooks` also registers the hooks |
 | `acus guard` | PreToolUse hook for Bash, PowerShell, Read, Grep and Glob that refuses shell searches, reads and in-place edits of source files, filtered builds, whole reads of large files and Grep calls, and names the acus command instead |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.

@@ -8,7 +8,7 @@
 - `acus guard` logs every decision next to the config file, including calls run through the escape; `acus usage --guard` counts them per rule and lists the escaped calls.
 - A trailing `# acus-skip` comment runs a refused shell command anyway, in Bash and PowerShell.
 - `acus ctx` without a command runs `[ctx] command` or the project's tests, detected from Cargo.toml, Package.swift, go.mod, package.json (npm, pnpm, yarn or bun) or pytest files.
-- `acus skill --map` adds a short map of the repository's source directories to the skill.
+- `acus map [DIR]`: directory tree within a token budget. The largest directories open first, tests and docs last; single-child chains and single-file directories are rolled up; manifests tag project roots; small directories show their files' top-level symbols. `acus guard` hints at it for `tree`, `ls -R`, unfiltered `find` and `Get-ChildItem -Recurse`.
 - `acus skill --install --hooks` registers the SessionStart and PreToolUse hooks in `~/.claude/settings.json`, keeping other settings and a backup.
 
 ### Changed
@@ -16,6 +16,10 @@
 - `acus ctx` only points to the full log when output was cut or the command failed.
 - `--json` output keeps keys in their natural order instead of sorting them.
 - CI also runs on macOS.
+
+### Fixed
+
+- `acus ctx` on Windows passes the command to `cmd` verbatim, so quoted paths work.
 
 ## [0.4.0]
 

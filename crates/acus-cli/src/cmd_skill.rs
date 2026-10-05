@@ -1,11 +1,7 @@
 use crate::Outcome;
-use acus_syntax::Lang;
-use acus_walk::{WalkOpts, walk};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 /// The skill shipped with this binary, so hook output and installed copies match its version.
 const SKILL: &str = include_str!("../../../skill/SKILL.md");
@@ -18,21 +14,11 @@ pub struct Args {
     /// With --install: also register the SessionStart and PreToolUse hooks in ~/.claude/settings.json.
     #[arg(long, requires = "install")]
     hooks: bool,
-    /// After the skill, print a compact project map (only inside a git checkout).
-    #[arg(long, conflicts_with = "install")]
-    map: bool,
 }
 
 pub fn run(a: Args) -> Result<Outcome> {
     if !a.install {
         print!("{}", body(SKILL));
-        if a.map {
-            let cwd = std::env::current_dir()?;
-            // Without a repository the cwd may be a directory full of projects: nothing useful to map.
-            if cwd.ancestors().any(|d| d.join(".git").exists()) {
-                print_map()?;
-            }
-        }
         return Ok(Outcome::Found);
     }
     let home = std::env::home_dir().context("no home directory")?;
@@ -48,75 +34,6 @@ pub fn run(a: Args) -> Result<Outcome> {
         install_hooks(&home.join(".claude/settings.json"))?;
     }
     Ok(Outcome::Found)
-}
-
-const MAP_LINES: usize = 40;
-
-/// Source files under the cwd with their line counts, as a map for the session context.
-fn print_map() -> Result<()> {
-    let found = Mutex::new(Vec::new());
-    let opts = WalkOpts {
-        roots: vec![".".into()],
-        include: vec![],
-        exclude: vec![],
-        hidden: false,
-        no_ignore: false,
-    };
-    walk(&opts, |f| {
-        if Lang::from_path(f).is_some()
-            && let Ok(b) = std::fs::read(f)
-        {
-            let n = b.iter().filter(|&&c| c == b'\n').count() + usize::from(!b.ends_with(b"\n"));
-            let path = acus_walk::display_path(f);
-            found.lock().unwrap().push((path, n));
-        }
-    })?;
-    let files = found.into_inner().unwrap();
-    if !files.is_empty() {
-        println!("\n## Project map\n");
-        println!("`acus outline DIR --depth 1` lists a directory's symbols.\n");
-        for l in map_lines(&files, MAP_LINES) {
-            println!("{l}");
-        }
-    }
-    Ok(())
-}
-
-/// One line per directory (`dir/  N files, L lines (rs, md)`, top level as `./`), sorted by
-/// path. Past `cap` lines only the directories with the most code stay.
-fn map_lines(files: &[(String, usize)], cap: usize) -> Vec<String> {
-    let mut dirs: BTreeMap<&str, (usize, usize, BTreeSet<&str>)> = BTreeMap::new();
-    for (path, lines) in files {
-        let (dir, name) = path.rsplit_once('/').unwrap_or((".", path));
-        let e = dirs.entry(dir).or_default();
-        e.0 += 1;
-        e.1 += lines;
-        if let Some((_, ext)) = name.rsplit_once('.') {
-            e.2.insert(ext);
-        }
-    }
-    let mut rows: Vec<_> = dirs.into_iter().collect();
-    let more = rows.len().saturating_sub(cap);
-    if more > 0 {
-        let mut by_size: Vec<_> = rows.iter().map(|r| (r.1.1, r.0)).collect();
-        by_size.sort_by_key(|&(lines, _)| std::cmp::Reverse(lines));
-        let keep: BTreeSet<_> = by_size.into_iter().take(cap).map(|(_, d)| d).collect();
-        rows.retain(|r| keep.contains(r.0));
-    }
-    let mut v: Vec<String> = rows
-        .iter()
-        .map(|(dir, (n, lines, exts))| {
-            let exts: Vec<_> = exts.iter().copied().collect();
-            let files = if *n == 1 { "file" } else { "files" };
-            format!("{dir}/  {n} {files}, {lines} lines ({})", exts.join(", "))
-        })
-        .collect();
-    if more > 0 {
-        v.push(format!(
-            "… {more} more directories (acus outline DIR --depth 1)"
-        ));
-    }
-    v
 }
 
 /// Registers the acus hooks in a Claude Code settings file, keeping a `.bak` of the old one.
@@ -214,37 +131,6 @@ fn body(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-
-    #[test]
-    fn map_groups_by_directory() {
-        let f = |p: &str, n| (p.to_string(), n);
-        let files = [
-            f("src/a.rs", 10),
-            f("src/b.rs", 5),
-            f("README.md", 3),
-            f("src/c.md", 2),
-        ];
-        assert_eq!(
-            super::map_lines(&files, 40),
-            [
-                "./  1 file, 3 lines (md)",
-                "src/  3 files, 17 lines (md, rs)"
-            ]
-        );
-    }
-
-    #[test]
-    fn map_keeps_largest_directories() {
-        let files: Vec<_> = (0..5).map(|i| (format!("d{i}/a.rs"), i + 1)).collect();
-        assert_eq!(
-            super::map_lines(&files, 2),
-            [
-                "d3/  1 file, 4 lines (rs)",
-                "d4/  1 file, 5 lines (rs)",
-                "… 3 more directories (acus outline DIR --depth 1)"
-            ]
-        );
-    }
 
     fn count(v: &serde_json::Value, event: &str) -> usize {
         v["hooks"][event].as_array().map_or(0, Vec::len)

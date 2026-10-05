@@ -125,7 +125,8 @@ impl Verdict {
 
 const ESCAPE: &str = "Only if acus cannot do this, rerun with a `command ` prefix.";
 const ESCAPE_PS: &str = "Only if acus cannot do this, rerun with `# acus-skip` at the end.";
-const GLOB_HINT: &str = "acus hint: `acus outline DIR --depth 1` lists a directory's source files with their top-level symbols, and `acus find -l 'PAT'` lists the files containing a text.";
+const GLOB_HINT: &str = "acus hint: `acus map [DIR]` shows the layout with file and line counts, `acus outline DIR --depth 1` lists a directory's source files with their top-level symbols, and `acus find -l 'PAT'` lists the files containing a text.";
+const TREE_HINT: &str = "acus hint: `acus map [DIR]` shows the tree with file and line counts within a token budget, rolls up deep paths and lists the top-level symbols of small directories.";
 
 const CODE: &[&str] = &[
     "rs", "swift", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "svelte", "vue", "py",
@@ -445,6 +446,9 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
     let code_file = args
         .iter()
         .any(|a| is_code_path(a.trim_matches(['\'', '"'])));
+    if is_listing(head, &args) {
+        return Some(Verdict::Hint("tree", TREE_HINT.into()));
+    }
     // PowerShell cmdlets and aliases (lowercased by `check_ps`) share the rules.
     let (name, reason) = match head {
         "grep" | "rg" | "egrep" | "fgrep" | "ag" | "ack" | "select-string" | "sls" if !piped => (
@@ -476,6 +480,29 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
         _ => return None,
     };
     Some(Verdict::Deny(name, reason))
+}
+
+/// Recursive directory listings: `tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`.
+/// Recursive directory listings: `tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`.
+/// A name filter or wildcard makes it a file search, which stays unhinted.
+fn is_listing(head: &str, args: &[&str]) -> bool {
+    const FIND_FILTERS: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-regex", "-exec", "-execdir", "-delete", "-newer",
+        "-mtime", "-mmin", "-size", "-empty", "-perm", "-user",
+    ];
+    let short = |a: &&&str| a.starts_with('-') && !a.starts_with("--");
+    match head {
+        "tree" => true,
+        "ls" => args.iter().filter(short).any(|a| a.contains('R')) || args.contains(&"--recursive"),
+        "get-childitem" | "gci" | "dir" => {
+            args.iter().any(|a| matches!(*a, "-recurse" | "-r" | "/s"))
+                && !args
+                    .iter()
+                    .any(|a| a.contains('*') || matches!(*a, "-filter" | "-include"))
+        }
+        "find" => !args.iter().any(|a| FIND_FILTERS.contains(a)),
+        _ => false,
+    }
 }
 
 fn is_code_path(w: &str) -> bool {
@@ -596,6 +623,33 @@ mod tests {
             "node -e \"const fs=require('fs');fs.writeFileSync('a.ts',fs.readFileSync('a.ts','utf8').replace('a','b'))\"",
         ] {
             assert!(matches!(check(cmd), Some(Verdict::Hint(..))), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn hints_at_acus_map_for_recursive_listings() {
+        for cmd in [
+            "tree -L 2",
+            "ls -laR src",
+            "find . -type f",
+            "find Sources -maxdepth 2",
+        ] {
+            assert!(
+                matches!(check(cmd), Some(Verdict::Hint("tree", _))),
+                "{cmd}"
+            );
+        }
+        assert!(matches!(
+            check_ps("Get-ChildItem -Recurse src"),
+            Some(Verdict::Hint("tree", _))
+        ));
+        for cmd in [
+            "ls -la",
+            "find . -name '*.rs'",
+            "find build -delete",
+            "ls --color",
+        ] {
+            assert!(check(cmd).is_none(), "{cmd}");
         }
     }
 

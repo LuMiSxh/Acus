@@ -3,6 +3,7 @@ mod cmd_decide;
 mod cmd_diff;
 mod cmd_find;
 mod cmd_guard;
+mod cmd_map;
 mod cmd_outline;
 mod cmd_patch;
 mod cmd_run;
@@ -40,6 +41,8 @@ enum Cmd {
     Find(cmd_find::Args),
     /// Symbols with kinds and line ranges; directories are walked.
     Outline(cmd_outline::Args),
+    /// Directory tree with file and line counts, opened as far as a line budget allows.
+    Map(cmd_map::Args),
     /// Print files, line ranges or symbols with line numbers.
     Show(cmd_show::Args),
     /// Apply a patch from stdin (Codex apply_patch format, SEARCH/REPLACE blocks, `*** Replace Symbol:`,
@@ -66,6 +69,7 @@ impl Cmd {
         match self {
             Cmd::Find(_) => "find",
             Cmd::Outline(_) => "outline",
+            Cmd::Map(_) => "map",
             Cmd::Show(_) => "show",
             Cmd::Patch(_) => "patch",
             Cmd::Usage(_) => "usage",
@@ -110,6 +114,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
     match cli.cmd {
         Cmd::Find(a) => cmd_find::run(a, &out),
         Cmd::Outline(a) => cmd_outline::run(a, &out),
+        Cmd::Map(a) => cmd_map::run(a),
         Cmd::Show(a) => cmd_show::run(a, &out),
         Cmd::Patch(a) => cmd_patch::run(a, &out, nested, &cfg),
         Cmd::Usage(a) => cmd_usage::run(a, &out, &cfg),
