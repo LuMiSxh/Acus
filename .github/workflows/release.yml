@@ -67,7 +67,7 @@ jobs:
                   echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
             - name: Build release binary
-              run: cargo build --release --locked -p acus-cli --features cmd-decide --target ${{ matrix.target }}
+              run: cargo build --release --locked -p acus-cli --features cmd-decide,cmd-update --target ${{ matrix.target }}
 
             - name: Install coreutils (macOS)
               if: runner.os == 'macOS'
