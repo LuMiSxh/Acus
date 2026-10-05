@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1]
+
+### Fixed
+
+- Empty diffs now exit successfully, and empty JSON results emit `null` consistently for direct commands and `run`.
+
 ## [0.6.0]
 
 ### Added

@@ -90,6 +90,7 @@ impl Cmd {
 pub enum Outcome {
     Found,
     Empty,
+    NoChanges,
     /// Pass through a child command's exit code.
     Exit(u8),
 }
@@ -139,9 +140,22 @@ fn main() -> ExitCode {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    match execute(Cli::parse(), false) {
+    let cli = Cli::parse();
+    let json = matches!(cli.format(), Format::Json);
+    match execute(cli, false) {
         Ok(Outcome::Found) => ExitCode::SUCCESS,
-        Ok(Outcome::Empty) => ExitCode::from(1),
+        Ok(Outcome::Empty) => {
+            if json {
+                println!("null");
+            }
+            ExitCode::from(1)
+        }
+        Ok(Outcome::NoChanges) => {
+            if json {
+                println!("null");
+            }
+            ExitCode::SUCCESS
+        }
         Ok(Outcome::Exit(c)) => ExitCode::from(c),
         Err(e) => {
             // Messages carry an optional second line `hint: …`.
