@@ -271,7 +271,7 @@ fn run_batch() {
         (code, out.as_str()),
         (
             0,
-            "[{\"address\":\"src/lib.rs\",\"end\":1,\"start\":1,\"text\":\"pub struct Parser {\"}]\n"
+            "[{\"address\":\"src/lib.rs\",\"start\":1,\"end\":1,\"text\":\"pub struct Parser {\"}]\n"
         )
     );
 }
