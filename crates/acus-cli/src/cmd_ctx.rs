@@ -104,7 +104,8 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     let half = a.max_output.max(2) / 2;
     let omitted = lines.len().saturating_sub(half * 2);
     // Whatever is not printed stays readable without running the command again.
-    let log = (omitted > 0 || dropped > 0)
+    // Dropped noise matters only when looking into a failure.
+    let log = (omitted > 0 || (dropped > 0 && code != 0))
         .then(|| save_log(&cwd, &command, &text))
         .flatten();
     if omitted > 0 {
@@ -450,6 +451,7 @@ fn snippet(path: &Path, line: usize, a: &Args) -> Option<(String, usize, Vec<Str
 #[cfg(test)]
 mod tests {
     use super::{candidates, clean, detect_command, quiet};
+    use regex::RegexSet;
 
     #[test]
     fn detects_project_command() {
@@ -474,7 +476,6 @@ mod tests {
         std::fs::write(sub.join("pytest.ini"), "").unwrap();
         assert_eq!(detect_command(&sub).as_deref(), Some("pytest -q"));
     }
-    use regex::RegexSet;
 
     #[test]
     fn drops_build_noise_but_keeps_failures() {

@@ -191,10 +191,10 @@ fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
         return None;
     }
     let mut cmd = format!("acus find {}", quote(input["pattern"].as_str()?));
-    if let Some(p) = input["path"].as_str().map(|p| relative(p, cwd)) {
-        if p != "." {
-            cmd += &format!(" {}", quote(&p));
-        }
+    if let Some(p) = input["path"].as_str().map(|p| relative(p, cwd))
+        && p != "."
+    {
+        cmd += &format!(" {}", quote(&p));
     }
     if let Some(g) = input["glob"].as_str() {
         cmd += &format!(" -g {}", quote(g));
@@ -397,7 +397,7 @@ fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> 
     Some(Verdict::Deny(
         "build-pipe",
         format!(
-            "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again. {ESCAPE}"
+            "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again (`acus ctx` alone runs the project's tests). {ESCAPE}"
         ),
     ))
 }
@@ -639,6 +639,20 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("fn f0 1-1"), "{reason}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shows_windows_paths_relative_to_the_session() {
+        assert_eq!(
+            super::relative(r"C:\repo\src\a.rs", Some(r"C:\repo")),
+            r"src\a.rs"
+        );
+        assert_eq!(super::relative(r"C:\repo", Some(r"C:\repo")), ".");
+        assert_eq!(
+            super::relative(r"D:\other\a.rs", Some(r"C:\repo")),
+            r"D:\other\a.rs"
+        );
     }
 
     #[test]

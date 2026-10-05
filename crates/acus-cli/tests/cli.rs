@@ -222,6 +222,55 @@ fn decide_without_endpoint_has_hint() {
 
 #[cfg(feature = "cmd-decide")]
 #[test]
+fn ctx_log_is_readable_with_show() {
+    // The acus binary itself prints enough lines and exists on every platform.
+    let cmd = format!("\"{}\" skill", env!("CARGO_BIN_EXE_acus"));
+    let (code, out, err) = acus(&["ctx", &cmd, "--max-output", "4"]);
+    assert_eq!(code, 0, "{err}");
+    let log = out
+        .lines()
+        .find_map(|l| l.split_once(", or acus show ")?.1.strip_suffix(":A-B"))
+        .unwrap_or_else(|| panic!("no log path in {out}"));
+    // On Windows the path starts with a drive letter, a colon the address parser must skip.
+    let (code, shown, err) = acus(&["show", &format!("{log}:2-3")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(shown.contains("2-3"), "{shown}");
+    assert!(shown.lines().any(|l| l.starts_with("3\t")), "{shown}");
+}
+
+#[test]
+fn guard_answers_hook_calls() {
+    use std::io::Write;
+    let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"));
+    let guard = |input: serde_json::Value| {
+        let mut child = bin()
+            .arg("guard")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(child.stdin.take().unwrap(), "{input}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let out = guard(serde_json::json!({
+        "tool_name": "Grep",
+        "cwd": dir,
+        "tool_input": {"pattern": "needle", "path": dir.join("src"), "output_mode": "content"},
+    }));
+    assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
+    assert!(out.contains("acus find 'needle' 'src'"), "{out}");
+    let out = guard(serde_json::json!({
+        "tool_name": "PowerShell",
+        "tool_input": {"command": "Get-Content src\\lib.rs"},
+    }));
+    assert!(out.contains("acus-skip"), "{out}");
+    let out = guard(serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
+    assert_eq!(out, "");
+}
+
+#[test]
 fn decide_without_key_warns_and_skips() {
     let env = [
         ("ACUS_DECIDE_URL", "http://127.0.0.1:9"),

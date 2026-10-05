@@ -298,6 +298,7 @@ mod tests {
         );
         assert_eq!(g[1]["matcher"], "Bash|Read|Grep|Glob|PowerShell");
     }
+
     #[test]
     fn body_drops_frontmatter() {
         assert_eq!(super::body("---\nname: x\n---\n\n# acus\n"), "# acus\n");

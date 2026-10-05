@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0]
+
+### Added
+
+- `acus guard` handles the Grep tool (refused with the equivalent `acus find`; counts and multiline searches pass), the Glob tool (a hint at `acus outline`) and the PowerShell tool on Windows (`Select-String`, `Get-Content`, builds piped into `Select-Object`, `-replace … | Set-Content`).
+- `acus guard` logs every decision next to the config file, including calls run through the escape; `acus usage --guard` counts them per rule and lists the escaped calls.
+- A trailing `# acus-skip` comment runs a refused shell command anyway, in Bash and PowerShell.
+- `acus ctx` without a command runs `[ctx] command` or the project's tests, detected from Cargo.toml, Package.swift, go.mod, package.json (npm, pnpm, yarn or bun) or pytest files.
+- `acus skill --map` adds a short map of the repository's source directories to the skill.
+- `acus skill --install --hooks` registers the SessionStart and PreToolUse hooks in `~/.claude/settings.json`, keeping other settings and a backup.
+
+### Changed
+
+- `acus ctx` only points to the full log when output was cut or the command failed.
+- `--json` output keeps keys in their natural order instead of sorting them.
+- CI also runs on macOS.
+
 ## [0.4.0]
 
 ### Added

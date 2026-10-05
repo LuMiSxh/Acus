@@ -1,11 +1,10 @@
-# macOS is the dev machine; private-repo macOS minutes cost 10x.
 name: ci
 on: [push, pull_request]
 jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
