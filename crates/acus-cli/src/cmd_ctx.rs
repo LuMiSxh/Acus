@@ -12,8 +12,9 @@ use std::sync::LazyLock;
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Shell command, e.g. 'cargo test -q'; stdout and stderr are merged.
-    command: String,
+    /// Shell command, e.g. 'cargo test -q'; stdout and stderr are merged. Default: `[ctx] command`,
+    /// else the project's test command (Cargo.toml, Package.swift, go.mod, package.json, pytest).
+    command: Option<String>,
     /// Output lines kept (head and tail halves).
     #[arg(long, default_value_t = 200)]
     max_output: usize,
@@ -43,18 +44,39 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
             cfg.path.display()
         )
     })?;
+    let command = match &a.command {
+        Some(c) => c.clone(),
+        None => {
+            let cwd = std::env::current_dir()?;
+            let c = cfg
+                .ctx
+                .command
+                .clone()
+                .or_else(|| detect_command(&cwd))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no command given and no project detected\nhint: pass a command, e.g. acus ctx 'cargo test -q', or set [ctx] command in {}",
+                        cfg.path.display()
+                    )
+                })?;
+            if out.format != Format::Json {
+                println!("{}", out.dim(&format!("$ {c}")));
+            }
+            c
+        }
+    };
     // The redirect must cover the whole command line, not just its last `&&` part.
     let cmd = if cfg!(windows) {
-        format!("({}) 2>&1", a.command)
+        format!("({command}) 2>&1")
     } else {
-        format!("exec 2>&1\n{}", a.command)
+        format!("exec 2>&1\n{command}")
     };
     let res = if cfg!(windows) {
         Command::new("cmd").args(["/C", &cmd]).output()
     } else {
         Command::new("sh").args(["-c", &cmd]).output()
     }
-    .with_context(|| format!("cannot run `{}`", a.command))?;
+    .with_context(|| format!("cannot run `{command}`"))?;
     let raw = String::from_utf8_lossy(&res.stdout);
     let text = if a.raw { raw.to_string() } else { clean(&raw) };
     let code = res.status.code().unwrap_or(1);
@@ -83,7 +105,7 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     let omitted = lines.len().saturating_sub(half * 2);
     // Whatever is not printed stays readable without running the command again.
     let log = (omitted > 0 || dropped > 0)
-        .then(|| save_log(&cwd, &a.command, &text))
+        .then(|| save_log(&cwd, &command, &text))
         .flatten();
     if omitted > 0 {
         lines[..half].iter().for_each(|l| println!("{l}"));
@@ -151,6 +173,36 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         println!("… {more} more locations (--max-refs {})", a.max_refs + more);
     }
     Ok(Outcome::Exit(code.clamp(0, 255) as u8))
+}
+
+/// The test command of the nearest project root at or above `start`; one directory is checked
+/// in a fixed order, so a Cargo.toml beside a package.json wins.
+fn detect_command(start: &Path) -> Option<String> {
+    start.ancestors().find_map(|d| {
+        let has = |f: &str| d.join(f).exists();
+        Some(if has("Cargo.toml") {
+            "cargo test -q".into()
+        } else if has("Package.swift") {
+            "swift test".into()
+        } else if has("go.mod") {
+            "go test ./...".into()
+        } else if has("package.json") {
+            let pm = if has("pnpm-lock.yaml") {
+                "pnpm"
+            } else if has("yarn.lock") {
+                "yarn"
+            } else if has("bun.lock") || has("bun.lockb") {
+                "bun"
+            } else {
+                "npm"
+            };
+            format!("{pm} test")
+        } else if has("pyproject.toml") || has("pytest.ini") || has("setup.py") {
+            "pytest -q".into()
+        } else {
+            return None;
+        })
+    })
 }
 
 /// Drops progress and success lines that only cost tokens: cargo `Compiling`/`Checking`/…,
@@ -397,7 +449,31 @@ fn snippet(path: &Path, line: usize, a: &Args) -> Option<(String, usize, Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{candidates, clean, quiet};
+    use super::{candidates, clean, detect_command, quiet};
+
+    #[test]
+    fn detects_project_command() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let sub = root.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let touch = |f: &str| std::fs::write(root.join(f), "").unwrap();
+        touch("package.json");
+        assert_eq!(detect_command(&sub).as_deref(), Some("npm test"));
+        touch("yarn.lock");
+        assert_eq!(detect_command(&sub).as_deref(), Some("yarn test"));
+        touch("pnpm-lock.yaml");
+        assert_eq!(detect_command(&sub).as_deref(), Some("pnpm test"));
+        touch("pyproject.toml");
+        assert_eq!(detect_command(&sub).as_deref(), Some("pnpm test"));
+        touch("go.mod");
+        assert_eq!(detect_command(&sub).as_deref(), Some("go test ./..."));
+        touch("Cargo.toml");
+        assert_eq!(detect_command(root).as_deref(), Some("cargo test -q"));
+        // The nearest root wins over a farther one.
+        std::fs::write(sub.join("pytest.ini"), "").unwrap();
+        assert_eq!(detect_command(&sub).as_deref(), Some("pytest -q"));
+    }
     use regex::RegexSet;
 
     #[test]
