@@ -1,4 +1,5 @@
 use crate::Outcome;
+use crate::config::Config;
 use crate::fmt::{Format, Out};
 use acus_usage::{Report, UsageOpts, WEIGHTS, group, report};
 use anyhow::Result;
@@ -24,6 +25,9 @@ pub struct Args {
     /// Count how agents search, read, edit and build (acus vs grep, sed, python, built-in tools).
     #[arg(long)]
     tools: bool,
+    /// Count `acus guard` decisions per rule and list the calls run through its escape.
+    #[arg(long)]
+    guard: bool,
 }
 
 /// 1234567 → "1.2M".
@@ -36,7 +40,10 @@ fn k(n: f64) -> String {
     }
 }
 
-pub fn run(a: Args, out: &Out) -> Result<Outcome> {
+pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
+    if a.guard {
+        return guard(&a, out, cfg);
+    }
     let r = report(&UsageOpts {
         claude_root: a.claude_dir,
         codex_root: a.codex_dir,
@@ -131,6 +138,79 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     let hidden = r.sessions.len().saturating_sub(a.top);
     if hidden > 0 {
         println!("… {hidden} more sessions (raise --top or filter with --project/--days)");
+    }
+    Ok(Outcome::Found)
+}
+
+/// Reads the guard log: per rule how often it refused, hinted or was escaped. Escaped calls
+/// are listed, since they point at refusals acus could not replace.
+fn guard(a: &Args, out: &Out, cfg: &Config) -> Result<Outcome> {
+    let path = crate::cmd_guard::log_path(cfg);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let since = a.days.map_or(0, |d| now.saturating_sub(d * 86_400));
+    let entries: Vec<serde_json::Value> = [path.with_extension("jsonl.old"), path.clone()]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .flat_map(|s| {
+            s.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|e: &serde_json::Value| e["ts"].as_u64().unwrap_or(0) >= since)
+        .filter(|e| {
+            a.project
+                .as_ref()
+                .is_none_or(|p| e["cwd"].as_str().unwrap_or_default().contains(p.as_str()))
+        })
+        .collect();
+    if entries.is_empty() {
+        eprintln!(
+            "no guard decisions in {}\nhint: add the acus guard PreToolUse hook (acus skill --install --hooks)",
+            path.display()
+        );
+        return Ok(Outcome::Empty);
+    }
+    let mut rules: std::collections::BTreeMap<&str, [u64; 3]> = Default::default();
+    for e in &entries {
+        let slot = match e["kind"].as_str() {
+            Some("deny") => 0,
+            Some("hint") => 1,
+            _ => 2,
+        };
+        rules.entry(e["rule"].as_str().unwrap_or("?")).or_default()[slot] += 1;
+    }
+    let escaped: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["kind"] == "escape")
+        .rev()
+        .take(a.top)
+        .collect();
+    if out.format == Format::Json {
+        let v: Vec<_> = rules
+            .iter()
+            .map(
+                |(r, n)| serde_json::json!({"rule": r, "deny": n[0], "hint": n[1], "escape": n[2]}),
+            )
+            .collect();
+        println!("{}", serde_json::json!({"rules": v, "escaped": escaped}));
+        return Ok(Outcome::Found);
+    }
+    println!("guard: {} decisions ({})", entries.len(), path.display());
+    println!("{}", out.header("rule deny hint escape"));
+    for (r, n) in &rules {
+        println!("  {r} {} {} {}", n[0], n[1], n[2]);
+    }
+    if !escaped.is_empty() {
+        println!("{}", out.header("latest escaped calls"));
+        for e in escaped {
+            println!(
+                "  {} {}",
+                e["rule"].as_str().unwrap_or("?"),
+                e["call"].as_str().unwrap_or_default().replace('\n', "⏎")
+            );
+        }
     }
     Ok(Outcome::Found)
 }

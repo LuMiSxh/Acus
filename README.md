@@ -49,13 +49,19 @@ cargo install --path crates/acus-cli --features cmd-decide
 acus skill --install
 ```
 
-Run `acus skill --install` again after each update so the skill matches the binary.
+Run `acus skill --install` again after each update so the skill matches the binary. `acus skill --install --hooks` also sets up Claude Code (see below); on Windows this is the whole setup.
 
 ## Agent setup
 
-An installed skill is only listed by its description, so agents often fall back to grep and cat. Load it into context instead.
+An installed skill is only listed by its description, so agents often fall back to grep and cat. Load it into context, and let a hook steer the remaining habits.
 
-**Claude Code.** Add a SessionStart hook to `~/.claude/settings.json`. It prints the skill at every start, `/clear` and compaction:
+**Claude Code.** One command registers both hooks in `~/.claude/settings.json` (keeping a `.bak` of the old file and everything else in it; a rerun replaces the acus entries instead of duplicating them):
+
+```sh
+acus skill --install --hooks
+```
+
+That adds:
 
 ```json
 {
@@ -63,12 +69,30 @@ An installed skill is only listed by its description, so agents often fall back 
     "SessionStart": [
       {
         "matcher": "startup|clear|compact",
-        "hooks": [{ "type": "command", "command": "acus skill || true" }]
+        "hooks": [{ "type": "command", "command": "acus skill 2>/dev/null || true" }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Glob|PowerShell",
+        "hooks": [{ "type": "command", "command": "acus guard 2>/dev/null || true" }]
       }
     ]
   }
 }
 ```
+
+The SessionStart hook prints the skill at every start, `/clear` and compaction. There is deliberately no project map in it: [overviews in context files did not help agents find the relevant files and raised cost](https://arxiv.org/abs/2602.11988). Agents call `acus map` when they need the layout instead.
+
+`acus guard` refuses what acus does better and names the acus command to use:
+
+- Bash: `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files, `sed -i`/`perl -i` edits, and builds or tests piped into `tail`/`head`/`grep` (`cargo test | tail` hides failures and leads to reruns). Pipe filters on other output (`git log | grep fix`) and heredoc bodies pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic.
+- PowerShell (Windows): the same rules for `Select-String`, `Get-Content`, `Select-Object -Last` after a build, and `-replace … | Set-Content` edits.
+- Read: without `offset`/`limit`, source and Markdown files over 300 lines; the refusal carries the file's outline so the agent can pick symbols with `acus show`.
+- Grep: refused with the equivalent `acus find` command; counts and multiline searches pass. Glob runs, with a hint at `acus map` and `acus outline`.
+- Recursive listings (`tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`) run, with a hint at `acus map`.
+
+A refused shell command can run anyway with a `command ` prefix (Bash) or a trailing `# acus-skip` comment (both shells). Every decision, escapes included, is logged next to the config file; `acus usage --guard` counts them per rule and lists the escaped calls, which point at refusals acus could not replace. `|| true` lets every call through when acus is missing or `guard` is disabled in the configuration. Hooks apply to subagents too, and on Windows Claude Code runs them with Git Bash.
 
 Subagents do not see SessionStart output. Preload the skill in each custom agent's frontmatter, and give read-only agents `Bash` so they can run it:
 
@@ -80,30 +104,11 @@ skills:
 
 The built-in Explore agent cannot preload skills; a custom agent with the same role can.
 
-Agents, subagents in particular, still reach for grep and sed out of habit. `acus guard` enforces the switch as a PreToolUse hook: it refuses `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files, `sed -i`/`perl -i` edits and builds or tests piped into `tail`/`head`/`grep` (`cargo test | tail`, which hides failures and leads to reruns), and the refusal names the acus command to use. Pipe filters on other output (`git log | grep fix`), heredoc bodies and commands prefixed with `command ` pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic. With `Read` in the matcher, a Read without `offset`/`limit` of a source or Markdown file over 300 lines is refused too, and the refusal carries the file's outline so the agent can pick symbols with `acus show`. Hooks apply to subagents too:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Read",
-        "hooks": [{ "type": "command", "command": "acus guard 2>/dev/null || true" }]
-      }
-    ]
-  }
-}
-```
-
-`|| true` lets every command through when acus is missing or `guard` is disabled in the configuration.
-
 **Codex.** Codex has no session hooks. Add a line to `~/.codex/AGENTS.md`:
 
 ```markdown
-Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 'PAT' --block`, `acus outline PATH`, `acus show path#Symbol path:A-B`), edit with one `acus patch`, and run builds and tests via `acus ctx 'COMMAND'`.
+Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 'PAT' --block`, `acus outline PATH`, `acus show path#Symbol path:A-B`), edit with one `acus patch`, and run builds and tests via `acus ctx` (alone for the project's tests, or `acus ctx 'COMMAND'`).
 ```
-
-The hook runs in the same way on Windows, where Claude Code executes hooks with Git Bash.
 
 ## Commands
 
@@ -113,13 +118,14 @@ The hook runs in the same way on Windows, where Claude Code executes hooks with 
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
-| `acus ctx 'COMMAND'` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. When output is cut, the full log is saved to a temp file and its path printed |
+| `acus ctx ['COMMAND']` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. Without a command it runs the project's tests (detected from Cargo.toml, Package.swift, go.mod, package.json or pytest files). When output is cut, the full log is saved to a temp file and its path printed |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
-| `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins) |
+| `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins); `--guard` counts `acus guard` decisions per rule |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
-| `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex |
-| `acus guard` | PreToolUse hook that refuses shell searches, reads and in-place edits of source files, filtered builds and whole reads of large files, and names the acus command instead |
+| `acus map [DIR]` | Directory tree with file and line counts within a token budget (`--budget 400`): the largest directories open first, chains like `a/b/c/` and single-file directories are rolled up, project roots are tagged, and small directories list their files' top-level symbols; tests and docs open last |
+| `acus skill` | Prints the bundled agent skill for a SessionStart hook; `--install` writes it for Claude Code and Codex, `--install --hooks` also registers the hooks |
+| `acus guard` | PreToolUse hook for Bash, PowerShell, Read, Grep and Glob that refuses shell searches, reads and in-place edits of source files, filtered builds, whole reads of large files and Grep calls, and names the acus command instead |
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
@@ -215,6 +221,7 @@ disabled = ["usage"]
 
 [ctx]
 drop = ["^warning: unused"]                         # extra output lines acus ctx hides
+command = "just test"                               # what `acus ctx` alone runs; default: detected
 
 [patch]
 fmt = true                                          # as if every patch had --fmt

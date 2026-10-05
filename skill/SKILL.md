@@ -14,11 +14,12 @@ One call answers what usually takes search → read → read. Output is line-num
 | Where X is used or defined | `acus find 'PAT' [PATH…] [-g '*.rs']` |
 | …plus the code around each hit | `acus find 'PAT' --block` |
 | Just the files / whole words / one type | `-l`, `-w`, `-t py`; `-u --hidden` also search ignored and hidden files |
+| How a repository or directory is laid out | `acus map [DIR]` |
 | What a file or directory contains | `acus outline PATH… [--depth 1]` |
 | A symbol, line range or file | `acus show src/a.rs#Parser::parse src/b.rs:40-80 README.md` |
 | Several independent lookups | `acus run` with one command per line on stdin |
 | Edit, rename across files, move or delete a symbol | `acus patch` with the patch on stdin |
-| Run tests/build and see the failing code | `acus ctx 'cargo test -q'` (noise is dropped; `--drop 'RE'` for more) |
+| Run tests/build and see the failing code | `acus ctx 'cargo test -q'`, or `acus ctx` alone for the project's tests (noise is dropped; `--drop 'RE'` for more) |
 | What changed (before a commit, review or handoff) | `acus diff [REV] [-p]` |
 
 ## Patch

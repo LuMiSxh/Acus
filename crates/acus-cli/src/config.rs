@@ -29,6 +29,8 @@ pub struct Commands {
 pub struct Ctx {
     /// Extra regexes; `acus ctx` drops output lines matching any of them.
     pub drop: Vec<String>,
+    /// Command `acus ctx` runs when none is given; default: detected from the project files.
+    pub command: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

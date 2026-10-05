@@ -2,4 +2,4 @@
 source: crates/acus-cli/tests/cli.rs
 expression: "acus(&[\"show\", \"src/lib.rs#Parser::new\", \"--json\"]).1"
 ---
-[{"address":"src/lib.rs#Parser::new","end":8,"start":6,"text":"    pub fn new() -> Self {\n        Parser { pos: 0 }\n    }"}]
+[{"address":"src/lib.rs#Parser::new","start":6,"end":8,"text":"    pub fn new() -> Self {\n        Parser { pos: 0 }\n    }"}]
