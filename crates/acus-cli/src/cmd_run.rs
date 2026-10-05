@@ -10,7 +10,7 @@ pub struct Args {}
 /// Reads one command per line (`find x --block`, shell-style quotes, `#` comments) or
 /// `[["find","x"],["show","a.rs#f"]]` from stdin and runs each entry in order.
 /// Agent/human output separates entries with `>>> acus …` lines; JSON output is one
-/// line per entry. Exit: 2 if any entry failed, else 0 if any found something.
+/// line per entry. Exit: 2 if any entry failed, 0 if any succeeded, otherwise 1.
 pub fn run(_: Args, out: &Out) -> Result<Outcome> {
     let mut s = String::new();
     std::io::stdin()
@@ -66,6 +66,12 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
         std::io::stdout().flush().ok();
         match res {
             Ok(Outcome::Found | Outcome::Exit(0)) => found = true,
+            Ok(Outcome::NoChanges) => {
+                found = true;
+                if out.format == Format::Json {
+                    println!("null");
+                }
+            }
             // A `ctx` command that failed counts as a failed entry.
             Ok(Outcome::Exit(_)) => failed = true,
             // JSON output keeps one line per entry, so an empty result is `null`.

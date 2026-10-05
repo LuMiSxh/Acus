@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1]
+
+### Fixed
+
+- Empty diffs now exit successfully; empty `find` and `diff` JSON results, including entries in `run --json`, emit `null`.
+
 ## [0.6.0]
 
 ### Added

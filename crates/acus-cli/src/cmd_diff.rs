@@ -112,7 +112,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
         if out.format != Format::Json {
             eprintln!("(no changes)");
         }
-        return Ok(Outcome::Empty);
+        return Ok(Outcome::NoChanges);
     }
 
     // An empty revision reads the index.

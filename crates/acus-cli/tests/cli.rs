@@ -84,6 +84,17 @@ fn find_nothing_exits_1() {
 }
 
 #[test]
+fn find_json_no_matches_is_null() {
+    let (code, out, err) = acus(&["find", "zzz_not_here", "--json"]);
+    assert_eq!(code, 1);
+    assert!(err.is_empty());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
 fn bad_regex_exits_2_with_error_line() {
     let (code, out, err) = acus(&["find", "("]);
     assert_eq!((code, out.as_str()), (2, ""));
@@ -323,6 +334,8 @@ fn run_batch() {
             "[{\"address\":\"src/lib.rs\",\"start\":1,\"end\":1,\"text\":\"pub struct Parser {\"}]\n"
         )
     );
+    let (code, out, err) = acus_in(dir, &["run", "--json"], r#"[["find","zzz_none"]]"#);
+    assert_eq!((code, out.as_str(), err.as_str()), (1, "null\n", ""));
 }
 
 #[test]
@@ -379,7 +392,19 @@ fn diff_groups_changes_by_symbol() {
     );
     git(&["add", "."]);
     git(&["commit", "-qm", "y"]);
-    assert_eq!(acus_in(d.path(), &["diff"], "").0, 1);
+    assert_eq!(
+        acus_in(d.path(), &["diff"], ""),
+        (0, String::new(), "(no changes)\n".into())
+    );
+    let (code, out, err) = acus_in(d.path(), &["diff", "--json"], "");
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::Value::Null
+    );
+    let (code, out, err) = acus_in(d.path(), &["run", "--json"], r#"[["diff"]]"#);
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "null\n", ""));
 }
 
 #[test]
