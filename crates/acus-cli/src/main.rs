@@ -112,14 +112,14 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Outline(a) => cmd_outline::run(a, &out),
         Cmd::Show(a) => cmd_show::run(a, &out),
         Cmd::Patch(a) => cmd_patch::run(a, &out, nested, &cfg),
-        Cmd::Usage(a) => cmd_usage::run(a, &out),
+        Cmd::Usage(a) => cmd_usage::run(a, &out, &cfg),
         Cmd::Decide(a) => cmd_decide::run(a, &out, &cfg),
         Cmd::Run(_) if nested => bail!("`run` cannot be nested"),
         Cmd::Run(a) => cmd_run::run(a, &out),
         Cmd::Ctx(a) => cmd_ctx::run(a, &out, &cfg),
         Cmd::Diff(a) => cmd_diff::run(a, &out),
         Cmd::Skill(a) => cmd_skill::run(a),
-        Cmd::Guard(a) => cmd_guard::run(a),
+        Cmd::Guard(a) => cmd_guard::run(a, &cfg),
     }
 }
 

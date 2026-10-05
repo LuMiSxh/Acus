@@ -3,51 +3,129 @@
 //! files, and tells the agent which acus command to use instead.
 
 use crate::Outcome;
+use crate::config::Config;
 use acus_syntax::{Lang, outline};
 use anyhow::Result;
 use regex::Regex;
-use std::io::Read;
-use std::path::Path;
+use serde_json::Value;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 #[derive(clap::Args)]
 pub struct Args {}
 
-pub fn run(_: Args) -> Result<Outcome> {
+pub fn run(_: Args, cfg: &Config) -> Result<Outcome> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+    let v: Value = serde_json::from_str(&input).unwrap_or_default();
     let input = &v["tool_input"];
+    let cwd = v["cwd"].as_str();
+    let command = input["command"].as_str().unwrap_or_default();
     let verdict = match v["tool_name"].as_str() {
-        Some("Read") => read_check(input, v["cwd"].as_str()),
-        _ => check(input["command"].as_str().unwrap_or_default()),
+        Some("Read") => read_check(input, cwd),
+        Some("Grep") => grep_tool(input, cwd),
+        Some("Glob") => Some(Verdict::Hint("glob-tool", GLOB_HINT.to_owned())),
+        Some("PowerShell") => check_ps(command),
+        _ => check(command),
     };
+    let Some(verdict) = verdict else {
+        return Ok(Outcome::Found);
+    };
+    log(cfg, &v, &verdict);
     let out = match verdict {
-        Some(Verdict::Deny(reason)) => serde_json::json!({ "hookSpecificOutput": {
+        Verdict::Deny(_, reason) => serde_json::json!({ "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         }}),
         // The command runs as usual; only the agent's context gains the hint.
-        Some(Verdict::Hint(hint)) => serde_json::json!({ "hookSpecificOutput": {
+        Verdict::Hint(_, hint) => serde_json::json!({ "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "additionalContext": hint,
         }}),
-        None => return Ok(Outcome::Found),
+        Verdict::Escape(_) => return Ok(Outcome::Found),
     };
     println!("{out}");
     Ok(Outcome::Found)
 }
 
+/// Every decision is logged here, for `acus usage --guard`.
+pub fn log_path(cfg: &Config) -> PathBuf {
+    cfg.path.with_file_name("guard.jsonl")
+}
+
+/// Appends one decision as a JSON line; a log that cannot be written is skipped.
+fn log(cfg: &Config, hook: &Value, v: &Verdict) {
+    let path = log_path(cfg);
+    // Start over past 4 MB, keeping one old generation.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 << 20) {
+        let _ = std::fs::rename(&path, path.with_extension("jsonl.old"));
+    }
+    let input = &hook["tool_input"];
+    let call: String = ["command", "file_path", "pattern"]
+        .iter()
+        .find_map(|k| input[k].as_str())
+        .unwrap_or_default()
+        .chars()
+        .take(300)
+        .collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let line = serde_json::json!({
+        "ts": ts,
+        "session": hook["session_id"],
+        "cwd": hook["cwd"],
+        "tool": hook["tool_name"],
+        "rule": v.rule(),
+        "kind": v.kind(),
+        "call": call,
+    });
+    let _ = path.parent().map(std::fs::create_dir_all);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Each verdict names the rule that produced it, for the log.
 #[derive(Debug, PartialEq)]
 enum Verdict {
-    /// Refuse the command; the reason names the acus command to use.
-    Deny(String),
-    /// Run the command, but tell the agent about the acus alternative.
-    Hint(String),
+    /// Refuse the call; the reason names the acus command to use.
+    Deny(&'static str, String),
+    /// Run the call, but tell the agent about the acus alternative.
+    Hint(&'static str, String),
+    /// A call the rule would refuse, run anyway through the escape; only logged.
+    Escape(&'static str),
+}
+
+impl Verdict {
+    fn rule(&self) -> &'static str {
+        match self {
+            Verdict::Deny(r, _) | Verdict::Hint(r, _) | Verdict::Escape(r) => r,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Verdict::Deny(..) => "deny",
+            Verdict::Hint(..) => "hint",
+            Verdict::Escape(_) => "escape",
+        }
+    }
+
+    fn escaped(self) -> Verdict {
+        Verdict::Escape(self.rule())
+    }
 }
 
 const ESCAPE: &str = "Only if acus cannot do this, rerun with a `command ` prefix.";
+const ESCAPE_PS: &str = "Only if acus cannot do this, rerun with `# acus-skip` at the end.";
+const GLOB_HINT: &str = "acus hint: `acus outline DIR --depth 1` lists a directory's source files with their top-level symbols, and `acus find -l 'PAT'` lists the files containing a text.";
 
 const CODE: &[&str] = &[
     "rs", "swift", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "svelte", "vue", "py",
@@ -69,17 +147,108 @@ fn read_check(input: &serde_json::Value, cwd: Option<&str>) -> Option<Verdict> {
     {
         return None;
     }
-    let path = Path::new(input["file_path"].as_str()?);
+    let file = input["file_path"].as_str()?;
+    let path = Path::new(file);
     // Data files are mostly read whole on purpose; their outline says little.
     let lang =
         Lang::from_path(path).filter(|l| !matches!(l, Lang::Toml | Lang::Json | Lang::Yaml))?;
     let src = std::fs::read_to_string(path).ok()?;
-    let shown = cwd
-        .and_then(|c| path.strip_prefix(c).ok())
-        .unwrap_or(path)
-        .display()
-        .to_string();
-    read_verdict(&shown, lang, &src)
+    read_verdict(&relative(file, cwd), lang, &src)
+}
+
+/// `path` relative to the session's directory when inside it, else as given.
+fn relative(path: &str, cwd: Option<&str>) -> String {
+    match cwd.and_then(|c| Path::new(path).strip_prefix(c).ok()) {
+        Some(p) if p.as_os_str().is_empty() => ".".to_owned(),
+        Some(p) => p.display().to_string(),
+        None => path.to_owned(),
+    }
+}
+
+/// A shell word: single-quoted unless the text holds a single quote.
+fn quote(s: &str) -> String {
+    if s.contains('\'') {
+        let escaped: String = s
+            .chars()
+            .flat_map(|c| {
+                let esc = matches!(c, '"' | '\\' | '$' | '`').then_some('\\');
+                esc.into_iter().chain([c])
+            })
+            .collect();
+        format!("\"{escaped}\"")
+    } else {
+        format!("'{s}'")
+    }
+}
+
+/// The built-in Grep tool: refused with the equivalent `acus find`. Counts and multiline
+/// patterns, which acus does not do, pass.
+fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
+    let mode = input["output_mode"]
+        .as_str()
+        .unwrap_or("files_with_matches");
+    if mode == "count" || input["multiline"].as_bool() == Some(true) {
+        return None;
+    }
+    let mut cmd = format!("acus find {}", quote(input["pattern"].as_str()?));
+    if let Some(p) = input["path"].as_str().map(|p| relative(p, cwd)) {
+        if p != "." {
+            cmd += &format!(" {}", quote(&p));
+        }
+    }
+    if let Some(g) = input["glob"].as_str() {
+        cmd += &format!(" -g {}", quote(g));
+    }
+    if let Some(t) = input["type"].as_str() {
+        cmd += &format!(" -t {t}");
+    }
+    if input["-i"].as_bool() == Some(true) {
+        cmd += " -i";
+    }
+    if mode == "files_with_matches" {
+        cmd += " -l";
+    } else if ["-A", "-B", "-C", "context"]
+        .iter()
+        .any(|k| !input[k].is_null())
+    {
+        cmd += " --block";
+    }
+    Some(Verdict::Deny(
+        "grep-tool",
+        format!(
+            "Use acus instead of the Grep tool: `{cmd}` groups the hits by file and enclosing symbol, and names the follow-up command for anything it cuts. Only if acus cannot do this, run `command rg` via Bash."
+        ),
+    ))
+}
+
+/// PowerShell: the same rules on the lowercased command, as cmdlets ignore case, plus
+/// `-replace … | Set-Content` edits.
+fn check_ps(cmd: &str) -> Option<Verdict> {
+    let c = cmd.to_lowercase();
+    let edit = (c.contains("-replace") || c.contains(".replace("))
+        && ["set-content", "out-file", "writealltext"]
+            .iter()
+            .any(|w| c.contains(w))
+        && c.split(|ch: char| ch.is_whitespace() || "()'\",;".contains(ch))
+            .any(is_code_path);
+    let v = if edit {
+        Verdict::Deny(
+            "ps-replace",
+            format!(
+                "Use acus instead of -replace with Set-Content: one `acus patch` with `*** Replace All: PATHS` or SEARCH/REPLACE blocks edits every file at once and prints the written lines. {ESCAPE_PS}"
+            ),
+        )
+    } else {
+        match check(&c)? {
+            Verdict::Deny(r, reason) => Verdict::Deny(r, reason.replace(ESCAPE, ESCAPE_PS)),
+            v => v,
+        }
+    };
+    Some(if c.contains("acus-skip") {
+        v.escaped()
+    } else {
+        v
+    })
 }
 
 fn read_verdict(path: &str, lang: Lang, src: &str) -> Option<Verdict> {
@@ -103,10 +272,21 @@ fn read_verdict(path: &str, lang: Lang, src: &str) -> Option<Verdict> {
         syms.truncate(OUTLINE_MAX);
         syms.push(format!("… {more} more (acus outline {path})"));
     }
-    Some(Verdict::Deny(format!(
-        "{path} has {lines} lines. Read only what you need: `acus show {path}#Symbol {path}:A-B` reads several symbols and ranges in one call, or Read with offset and limit. Only if you need the whole file, Read it with limit: {lines}.\nOutline of {path}:\n{}",
-        syms.join("\n")
-    )))
+    Some(Verdict::Deny(
+        "read-tool",
+        format!(
+            "{path} has {lines} lines. Read only what you need: `acus show {path}#Symbol {path}:A-B` reads several symbols and ranges in one call, or Read with offset and limit. Only if you need the whole file, Read it with limit: {lines}.\nOutline of {path}:\n{}",
+            syms.join("\n")
+        ),
+    ))
+}
+
+/// A segment run through the `command ` escape, and the segment without it.
+fn unescape(seg: &str) -> (bool, &str) {
+    match seg.trim_start().strip_prefix("command ") {
+        Some(rest) => (true, rest),
+        None => (false, seg),
+    }
 }
 
 /// What to do with `cmd`: refusing wins over hinting, `None` lets it run.
@@ -121,17 +301,25 @@ fn check(cmd: &str) -> Option<Verdict> {
         is_edit_script(body).then(|| script_hint(&interp))
     });
     let segs = segments(&rest);
-    let filtered = segs
-        .windows(2)
-        .filter_map(|w| filtered_build(&w[0].0, &w[1]));
-    let verdicts: Vec<Verdict> = segs
+    let mark = |esc: bool, v: Verdict| if esc { v.escaped() } else { v };
+    let filtered = segs.windows(2).filter_map(|w| {
+        let (esc, seg) = unescape(&w[0].0);
+        filtered_build(seg, &w[1]).map(|v| mark(esc, v))
+    });
+    let v = segs
         .iter()
-        .filter_map(|(seg, piped)| rule(seg, *piped))
+        .filter_map(|(seg, piped)| {
+            let (esc, seg) = unescape(seg);
+            rule(seg, *piped).map(|v| mark(esc, v))
+        })
         .chain(filtered)
         .chain(scripts)
-        .collect();
-    let deny = verdicts.iter().position(|v| matches!(v, Verdict::Deny(_)));
-    verdicts.into_iter().nth(deny.unwrap_or(0))
+        .min_by_key(|v| match v {
+            Verdict::Deny(..) => 0,
+            Verdict::Hint(..) => 1,
+            Verdict::Escape(_) => 2,
+        })?;
+    Some(mark(cmd.contains("acus-skip"), v))
 }
 
 fn is_interpreter(head: &str) -> bool {
@@ -163,7 +351,18 @@ fn is_edit_script(s: &str) -> bool {
 /// and the build runs again to see more.
 fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> {
     let (filter, _) = head(next).filter(|_| *piped)?;
-    if !matches!(filter, "tail" | "head" | "grep" | "egrep" | "rg") {
+    if !matches!(
+        filter,
+        "tail"
+            | "head"
+            | "grep"
+            | "egrep"
+            | "rg"
+            | "select-object"
+            | "select"
+            | "select-string"
+            | "sls"
+    ) {
         return None;
     }
     let (build, args) = head(seg)?;
@@ -195,16 +394,22 @@ fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> 
     } else {
         format!("acus ctx '{cmd}'")
     };
-    Some(Verdict::Deny(format!(
-        "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again. {ESCAPE}"
-    )))
+    Some(Verdict::Deny(
+        "build-pipe",
+        format!(
+            "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again. {ESCAPE}"
+        ),
+    ))
 }
 
 /// Edit scripts are only hinted at: telling them apart from data processing is a heuristic.
 fn script_hint(interp: &str) -> Verdict {
-    Verdict::Hint(format!(
-        "acus hint: this {interp} script edits source files. Next time use one `acus patch` with SEARCH/REPLACE blocks or `*** Replace All: PATHS` (literal or REGEX): it edits every file at once, all or nothing, and prints the written lines."
-    ))
+    Verdict::Hint(
+        "edit-script",
+        format!(
+            "acus hint: this {interp} script edits source files. Next time use one `acus patch` with SEARCH/REPLACE blocks or `*** Replace All: PATHS` (literal or REGEX): it edits every file at once, all or nothing, and prints the written lines."
+        ),
+    )
 }
 
 /// The command word of a simple command, past assignments and keywords, and its arguments.
@@ -237,31 +442,44 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
     let in_place = args.iter().any(|a| {
         *a == "--in-place" || (a.starts_with('-') && !a.starts_with("--") && a.contains('i'))
     });
-    let code_file = args.iter().any(|a| {
-        let a = a.trim_matches(['\'', '"']);
-        !a.starts_with('-') && a.rsplit_once('.').is_some_and(|(_, e)| CODE.contains(&e))
-    });
-    let reason = match head {
-        "grep" | "rg" | "egrep" | "fgrep" | "ag" | "ack" if !piped => format!(
-            "Use acus instead of {head}: `acus find 'PAT' [PATH…]` (`--block` adds the enclosing code, `-l` lists files, `-w`, `-t TYPE`, `-g GLOB`, `-u --hidden` include ignored and hidden files). {ESCAPE}"
+    let code_file = args
+        .iter()
+        .any(|a| is_code_path(a.trim_matches(['\'', '"'])));
+    // PowerShell cmdlets and aliases (lowercased by `check_ps`) share the rules.
+    let (name, reason) = match head {
+        "grep" | "rg" | "egrep" | "fgrep" | "ag" | "ack" | "select-string" | "sls" if !piped => (
+            "grep",
+            format!(
+                "Use acus instead of {head}: `acus find 'PAT' [PATH…]` (`--block` adds the enclosing code, `-l` lists files, `-w`, `-t TYPE`, `-g GLOB`, `-u --hidden` include ignored and hidden files). {ESCAPE}"
+            ),
         ),
-        "sed" | "perl" if in_place => format!(
-            "Use acus instead of {head} -i: one `acus patch` with `*** Replace All: PATHS` or SEARCH/REPLACE blocks edits every file at once and prints the written lines. {ESCAPE}"
+        "sed" | "perl" if in_place => (
+            "sed-i",
+            format!(
+                "Use acus instead of {head} -i: one `acus patch` with `*** Replace All: PATHS` or SEARCH/REPLACE blocks edits every file at once and prints the written lines. {ESCAPE}"
+            ),
         ),
-        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "less"
+        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "less" | "get-content" | "gc" | "type"
             if !piped
                 && code_file
                 && !seg.contains('>')
                 && (head != "sed" || args.contains(&"-n"))
                 && !args.iter().any(|a| matches!(*a, "-f" | "-F")) =>
         {
-            format!(
-                "Use acus instead of {head}: `acus show path path:A-B path#Symbol` reads several files, ranges or symbols in one call; `acus outline PATH` gives an overview. {ESCAPE}"
+            (
+                "read-shell",
+                format!(
+                    "Use acus instead of {head}: `acus show path path:A-B path#Symbol` reads several files, ranges or symbols in one call; `acus outline PATH` gives an overview. {ESCAPE}"
+                ),
             )
         }
         _ => return None,
     };
-    Some(Verdict::Deny(reason))
+    Some(Verdict::Deny(name, reason))
+}
+
+fn is_code_path(w: &str) -> bool {
+    !w.starts_with('-') && w.rsplit_once('.').is_some_and(|(_, e)| CODE.contains(&e))
 }
 
 fn is_assignment(w: &str) -> bool {
@@ -342,8 +560,9 @@ fn segments(cmd: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{READ_MAX, Verdict, check, read_verdict};
+    use super::{READ_MAX, Verdict, check, check_ps, grep_tool, read_verdict};
     use acus_syntax::Lang;
+    use serde_json::json;
 
     #[test]
     fn refuses_file_searches_reads_and_in_place_edits() {
@@ -364,7 +583,7 @@ mod tests {
             "npx tsc --noEmit | head",
             "pnpm run build | tail -20",
         ] {
-            assert!(matches!(check(cmd), Some(Verdict::Deny(_))), "{cmd}");
+            assert!(matches!(check(cmd), Some(Verdict::Deny(..))), "{cmd}");
         }
     }
 
@@ -376,7 +595,7 @@ mod tests {
             "python3 -c \"p='lib.py'; s=open(p).read(); open(p,'w').write(s.replace('a','b'))\"",
             "node -e \"const fs=require('fs');fs.writeFileSync('a.ts',fs.readFileSync('a.ts','utf8').replace('a','b'))\"",
         ] {
-            assert!(matches!(check(cmd), Some(Verdict::Hint(_))), "{cmd}");
+            assert!(matches!(check(cmd), Some(Verdict::Hint(..))), "{cmd}");
         }
     }
 
@@ -389,7 +608,6 @@ mod tests {
             "acus ctx 'cargo test | tail'",
             "npm install | tail -3",
             "git commit -m \"fix; grep foo\"",
-            "command grep -rn foo src",
             "cat > notes.md <<'EOF'\ngrep foo bar\nEOF",
             "acus patch <<'P'\nsed -i x a.rs\nP",
             "cat Cargo.lock",
@@ -411,7 +629,8 @@ mod tests {
         let small: String = (0..READ_MAX).map(|i| format!("fn f{i}() {{}}\n")).collect();
         assert_eq!(read_verdict("src/a.rs", Lang::Rust, &small), None);
         let large = format!("{small}fn last() {{}}\n");
-        let Some(Verdict::Deny(reason)) = read_verdict("src/a.rs", Lang::Rust, &large) else {
+        let Some(Verdict::Deny("read-tool", reason)) = read_verdict("src/a.rs", Lang::Rust, &large)
+        else {
             panic!("large file read whole");
         };
         assert!(reason.contains("src/a.rs has 301 lines"), "{reason}");
@@ -420,5 +639,80 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("fn f0 1-1"), "{reason}");
+    }
+
+    #[test]
+    fn logs_escapes_as_such() {
+        for (cmd, rule) in [
+            ("command grep -rn foo src", "grep"),
+            ("cd a && command cat src/a.rs", "read-shell"),
+            ("command cargo test | tail", "build-pipe"),
+            ("grep -rn foo src # acus-skip", "grep"),
+        ] {
+            assert_eq!(check(cmd), Some(Verdict::Escape(rule)), "{cmd}");
+        }
+        // An escape elsewhere does not excuse another refused segment.
+        assert!(matches!(
+            check("command grep x a.rs; grep y src"),
+            Some(Verdict::Deny("grep", _))
+        ));
+    }
+
+    #[test]
+    fn turns_grep_tool_calls_into_acus_find() {
+        let cwd = Some("/repo");
+        let deny = |v| match grep_tool(&v, cwd) {
+            Some(Verdict::Deny("grep-tool", r)) => r,
+            other => panic!("{other:?}"),
+        };
+        let r = deny(
+            json!({"pattern": "fn main", "path": "/repo/src", "output_mode": "content", "-C": 3, "type": "rust"}),
+        );
+        assert!(
+            r.contains("`acus find 'fn main' 'src' -t rust --block`"),
+            "{r}"
+        );
+        let r = deny(json!({"pattern": "it's", "path": "/repo", "glob": "*.md"}));
+        assert!(r.contains("`acus find \"it's\" -g '*.md' -l`"), "{r}");
+        assert_eq!(
+            grep_tool(&json!({"pattern": "x", "output_mode": "count"}), cwd),
+            None
+        );
+        assert_eq!(
+            grep_tool(&json!({"pattern": "a\nb", "multiline": true}), cwd),
+            None
+        );
+    }
+
+    #[test]
+    fn applies_the_rules_to_powershell() {
+        for (cmd, rule) in [
+            ("Select-String -Path src\\*.rs -Pattern foo", "grep"),
+            ("Get-Content src\\main.rs", "read-shell"),
+            ("cargo test 2>&1 | Select-Object -Last 30", "build-pipe"),
+            (
+                "(Get-Content a.rs) -replace 'x','y' | Set-Content a.rs",
+                "ps-replace",
+            ),
+        ] {
+            match check_ps(cmd) {
+                Some(Verdict::Deny(r, reason)) => {
+                    assert_eq!(r, rule, "{cmd}");
+                    assert!(reason.contains("# acus-skip"), "{reason}");
+                }
+                other => panic!("{cmd}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            check_ps("Get-Content src\\main.rs # acus-skip"),
+            Some(Verdict::Escape("read-shell"))
+        );
+        for cmd in [
+            "git log --oneline | Select-String fix",
+            "Get-Content settings.ini",
+            "Get-ChildItem -Recurse *.rs",
+        ] {
+            assert_eq!(check_ps(cmd), None, "{cmd}");
+        }
     }
 }
