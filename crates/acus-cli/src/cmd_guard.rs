@@ -449,6 +449,9 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
     if is_listing(head, &args) {
         return Some(Verdict::Hint("tree", TREE_HINT.into()));
     }
+    if head == "git" {
+        return git_hint(&args);
+    }
     // PowerShell cmdlets and aliases (lowercased by `check_ps`) share the rules.
     let (name, reason) = match head {
         "grep" | "rg" | "egrep" | "fgrep" | "ag" | "ack" | "select-string" | "sls" if !piped => (
@@ -482,7 +485,87 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
     Some(Verdict::Deny(name, reason))
 }
 
-/// Recursive directory listings: `tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`.
+/// Plain `git status|diff|log|show` print more than an agent needs; `acus diff` and `acus log` group
+/// and cap them. Output already compacted by a flag, and `git show REV:path` file reads, stay unhinted.
+fn git_hint(args: &[&str]) -> Option<Verdict> {
+    let mut it = args.iter().copied();
+    let sub = loop {
+        match it.next()? {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => {
+                it.next();
+            }
+            a if a.starts_with('-') => {}
+            a => break a,
+        }
+    };
+    let rest: Vec<&str> = it.collect();
+    let has = |flags: &[&str]| {
+        rest.iter().any(|a| {
+            flags
+                .iter()
+                .any(|f| a == f || a.starts_with(&format!("{f}=")))
+        })
+    };
+    let (rule, hint) = match sub {
+        "status" if !has(&["-s", "-sb", "--short", "--porcelain"]) => (
+            "git-status",
+            "acus hint: `acus diff` lists uncommitted changes per file and function with line counts, untracked files included; `-p` adds the changed lines and `--staged` limits it to the index.",
+        ),
+        "diff"
+            if !has(&[
+                "--stat",
+                "--shortstat",
+                "--numstat",
+                "--name-only",
+                "--name-status",
+                "--quiet",
+                "--check",
+                "--exit-code",
+                "--summary",
+                "--no-index",
+            ]) =>
+        {
+            (
+                "git-diff",
+                "acus hint: `acus diff [REV|A..B] [PATH…]` groups changes by enclosing function; `-p` adds the changed lines, `--staged` limits it to the index.",
+            )
+        }
+        "log"
+            if !has(&[
+                "--oneline",
+                "--format",
+                "--pretty",
+                "--name-only",
+                "--stat",
+                "--shortstat",
+            ]) =>
+        {
+            (
+                "git-log",
+                "acus hint: `acus log [REV] [PATH…] [-n N]` prints one line per commit with date, author and changed lines; `acus diff REV^..REV` shows what one commit changed.",
+            )
+        }
+        "show"
+            if !has(&[
+                "--stat",
+                "--name-only",
+                "--name-status",
+                "-s",
+                "--no-patch",
+                "--format",
+                "--pretty",
+            ]) && !rest.iter().any(|a| a.contains(':')) =>
+        {
+            (
+                "git-show",
+                "acus hint: `acus diff REV^..REV` shows one commit's changes per function (`-p` adds the lines); `acus log` lists commits.",
+            )
+        }
+        _ => return None,
+    };
+    Some(Verdict::Hint(rule, hint.into()))
+}
+
 /// Recursive directory listings: `tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`.
 /// A name filter or wildcard makes it a file search, which stays unhinted.
 fn is_listing(head: &str, args: &[&str]) -> bool {
@@ -648,6 +731,41 @@ mod tests {
             "find . -name '*.rs'",
             "find build -delete",
             "ls --color",
+        ] {
+            assert!(check(cmd).is_none(), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn hints_at_acus_for_plain_git_history_and_status() {
+        for (cmd, rule) in [
+            ("git status", "git-status"),
+            ("git diff", "git-diff"),
+            ("git diff --cached src/main.rs", "git-diff"),
+            ("git -C ../x log -5", "git-log"),
+            ("git --no-pager log", "git-log"),
+            ("git show HEAD", "git-show"),
+        ] {
+            assert!(
+                matches!(check(cmd), Some(Verdict::Hint(r, _)) if r == rule),
+                "{cmd}"
+            );
+        }
+        assert!(matches!(
+            check_ps("git status"),
+            Some(Verdict::Hint("git-status", _))
+        ));
+        for cmd in [
+            "git status --short",
+            "git status -sb",
+            "git diff --stat",
+            "git diff --name-only HEAD~1",
+            "git log --oneline -5",
+            "git log --format=%h",
+            "git show HEAD:src/main.rs",
+            "git show --stat HEAD",
+            "git commit -m x",
+            "git add -A",
         ] {
             assert!(check(cmd).is_none(), "{cmd}");
         }

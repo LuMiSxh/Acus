@@ -20,7 +20,8 @@ One call answers what usually takes search → read → read. Output is line-num
 | Several independent lookups | `acus run` with one command per line on stdin |
 | Edit, rename across files, move or delete a symbol | `acus patch` with the patch on stdin |
 | Run tests/build and see the failing code | `acus ctx 'cargo test -q'`, or `acus ctx` alone for the project's tests (noise is dropped; `--drop 'RE'` for more) |
-| What changed (before a commit, review or handoff) | `acus diff [REV] [-p]` |
+| What changed (before a commit, review or handoff; replaces `git status` and `git diff`) | `acus diff [REV] [-p]` |
+| Recent commits (replaces `git log`) | `acus log [REV] [PATH…] [-n N]`; one commit's changes: `acus diff REV^..REV` |
 
 ## Patch
 
