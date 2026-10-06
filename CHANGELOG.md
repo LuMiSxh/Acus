@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.1]
+
+### Changed
+
+- `acus guard` also hints at edit scripts written to a file with `cat > x.py <<EOF` or `tee x.rb <<EOF` (`.py`, `.js`, `.mjs`, `.cjs`, `.rb`), not only at `python - <<EOF`. Writing a script file that does not rewrite a source file stays unhinted.
+
 ## [0.7.0]
 
 ### Added

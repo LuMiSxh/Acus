@@ -298,6 +298,7 @@ fn check(cmd: &str) -> Option<Verdict> {
             head(seg)
                 .map(|(h, _)| h.to_owned())
                 .filter(|h| is_interpreter(h))
+                .or_else(|| script_writer(seg).map(str::to_owned))
         })?;
         is_edit_script(body).then(|| script_hint(&interp))
     });
@@ -325,6 +326,22 @@ fn check(cmd: &str) -> Option<Verdict> {
 
 fn is_interpreter(head: &str) -> bool {
     head.starts_with("python") || matches!(head, "node" | "ruby" | "bun" | "deno")
+}
+
+/// `cat > x.py <<EOF` or `tee x.py <<EOF`: the heredoc body is a script that runs in a later call.
+fn script_writer(seg: &str) -> Option<&'static str> {
+    let (head, words) = head(seg)?;
+    if !matches!(head, "cat" | "tee") {
+        return None;
+    }
+    words
+        .map(|w| w.trim_matches(['\'', '"', '>']))
+        .find_map(|w| match w.rsplit_once('.')?.1 {
+            "py" => Some("python"),
+            "js" | "mjs" | "cjs" => Some("node"),
+            "rb" => Some("ruby"),
+            _ => None,
+        })
 }
 
 /// A script that reads a source file, replaces text in it and writes it back: a hand-made patch.
@@ -704,9 +721,13 @@ mod tests {
             "cd app && uv run python - <<'E'\nimport re, pathlib\nf=pathlib.Path(\"Sources/A.swift\")\nf.write_text(re.sub(r'x','y',f.read_text()))\nE",
             "python3 -c \"p='lib.py'; s=open(p).read(); open(p,'w').write(s.replace('a','b'))\"",
             "node -e \"const fs=require('fs');fs.writeFileSync('a.ts',fs.readFileSync('a.ts','utf8').replace('a','b'))\"",
+            "cd /w && cat > .tmp_e.py <<'EOF'\nfrom pathlib import Path\np = Path(\"a/b.py\")\np.write_text(p.read_text().replace('x', 'y'))\nEOF\npython .tmp_e.py && rm .tmp_e.py",
+            "tee fix.rb <<'EOF'\nf = 'a.rb'\nFile.write(f, File.read(f).gsub('a', 'b'))\nEOF",
         ] {
             assert!(matches!(check(cmd), Some(Verdict::Hint(..))), "{cmd}");
         }
+        // A script file that does not edit sources stays unhinted.
+        assert!(check("cat > run.py <<'EOF'\nprint('hi')\nEOF").is_none());
     }
 
     #[test]
@@ -790,7 +811,6 @@ mod tests {
             "python3 - <<'EOF'\nimport json\nprint(json.load(open('data.json'))['x'].replace('a','b'))\nEOF",
             "python3 - <<'EOF'\nrows=open('in.csv').read().replace(';',',')\nopen('out.csv','w').write(rows)\nEOF",
             "acus patch <<'P'\n*** Update File: tool.py\n+open('a.py','w').write(s.replace('a','b'))\nP",
-            "cat > gen.py <<'EOF'\nopen('a.py','w').write(s.replace('a','b'))\nEOF",
         ] {
             assert_eq!(check(cmd), None, "{cmd}");
         }
