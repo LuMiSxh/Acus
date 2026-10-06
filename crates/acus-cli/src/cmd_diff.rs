@@ -245,7 +245,7 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     Ok(Outcome::Found)
 }
 
-fn git(args: &[&str]) -> Result<String> {
+pub fn git(args: &[&str]) -> Result<String> {
     let o = Command::new("git").args(args).output()?;
     if !o.status.success() {
         bail!(

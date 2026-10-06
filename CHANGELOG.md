@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `acus log [REV] [PATH...] [-n N]`: one line per commit with date, author and changed lines, in agent, JSON and `run` output.
+- `acus guard` hints at `acus diff` for plain `git status` and `git diff`, at `acus log` for `git log`, and at `acus diff REV^..REV` for `git show`, in Bash and PowerShell. Calls already compacted by a flag and `git show REV:path` pass without a hint.
+
 ## [0.6.1]
 
 ### Fixed

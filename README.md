@@ -91,6 +91,7 @@ The SessionStart hook prints the skill at every start, `/clear` and compaction. 
 - Read: without `offset`/`limit`, source and Markdown files over 300 lines; the refusal carries the file's outline so the agent can pick symbols with `acus show`.
 - Grep: refused with the equivalent `acus find` command; counts and multiline searches pass. Glob runs, with a hint at `acus map` and `acus outline`.
 - Recursive listings (`tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`) run, with a hint at `acus map`.
+- Plain `git status`, `git diff`, `git log` and `git show` run, with a hint at `acus diff` or `acus log`. Output already compacted by a flag (`--short`, `--stat`, `--name-only`, `--oneline`, `--format`) and `git show REV:path` pass without a hint.
 
 A refused shell command can run anyway with a `command ` prefix (Bash) or a trailing `# acus-skip` comment (both shells). Every decision, escapes included, is logged next to the config file; `acus usage --guard` counts them per rule and lists the escaped calls, which point at refusals acus could not replace. `|| true` lets every call through when acus is missing or `guard` is disabled in the configuration. Hooks apply to subagents too, and on Windows Claude Code runs them with Git Bash.
 
@@ -120,6 +121,7 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
 | `acus ctx ['COMMAND']` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. Without a command it runs the project's tests (detected from Cargo.toml, Package.swift, go.mod, package.json or pytest files). When output is cut, the full log is saved to a temp file and its path printed |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
+| `acus log [REV] [PATH...]` | One line per commit with date, author and changed lines; `-n` sets the count (default 15); `REV` can be `A..B` |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
 | `acus usage` | Token, cost and tool-call statistics from Claude Code and Codex transcripts; `--tools` shows how agents search, read, edit and build (acus vs grep, sed, python, built-ins); `--guard` counts `acus guard` decisions per rule |
 | `acus decide QUESTION` | Yes/no, choice or score answer from a Jev-compatible API; without an API key it warns and exits 2 |
@@ -130,7 +132,7 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 
 Addresses look like `path#Type::method`, `path:10-40`, `path:10` or just `path`. A unique suffix such as `#method` is enough, `Type.method` works too, and config keys nest the same way (`config.yaml#server::port`). A symbol is shown with its doc comments, attributes and decorators.
 
-Exit codes are 0 for results or success, 1 for an empty result when that command treats emptiness as no match, and 2 for errors. Empty `find` and `diff` results serialize as `null`; `run --json` emits one `null` per empty entry. `find` with no matches exits 1, while `diff` with no changes exits 0. Errors carry a `hint:` line. `ctx` passes on the exit code of the command it ran.
+Exit codes are 0 for results or success, 1 for an empty result when that command treats emptiness as no match, and 2 for errors. Empty `find`, `log` and `diff` results serialize as `null`; `run --json` emits one `null` per empty entry. `find` and `log` with no matches exit 1, while `diff` with no changes exits 0. Errors carry a `hint:` line. `ctx` passes on the exit code of the command it ran.
 
 Output defaults to a compact agent format. `--json` and `--human` are there for scripts and people.
 

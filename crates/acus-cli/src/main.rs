@@ -3,6 +3,7 @@ mod cmd_decide;
 mod cmd_diff;
 mod cmd_find;
 mod cmd_guard;
+mod cmd_log;
 mod cmd_map;
 mod cmd_outline;
 mod cmd_patch;
@@ -57,6 +58,8 @@ enum Cmd {
     Ctx(cmd_ctx::Args),
     /// Uncommitted (or `REV`, `A..B`) changes grouped by enclosing symbol; `-p` adds the lines.
     Diff(cmd_diff::Args),
+    /// Recent commits, one line each with date, author and changed lines.
+    Log(cmd_log::Args),
     /// Run several commands from a JSON array of argument lists on stdin.
     Run(cmd_run::Args),
     /// Print the agent skill (for a SessionStart hook) or install it with `--install`.
@@ -80,6 +83,7 @@ impl Cmd {
             Cmd::Run(_) => "run",
             Cmd::Ctx(_) => "ctx",
             Cmd::Diff(_) => "diff",
+            Cmd::Log(_) => "log",
             Cmd::Skill(_) => "skill",
             Cmd::Guard(_) => "guard",
             Cmd::Update(_) => "update",
@@ -128,6 +132,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         Cmd::Run(a) => cmd_run::run(a, &out),
         Cmd::Ctx(a) => cmd_ctx::run(a, &out, &cfg),
         Cmd::Diff(a) => cmd_diff::run(a, &out),
+        Cmd::Log(a) => cmd_log::run(a, &out),
         Cmd::Skill(a) => cmd_skill::run(a),
         Cmd::Guard(a) => cmd_guard::run(a, &cfg),
         Cmd::Update(a) => cmd_update::run(a),
@@ -136,7 +141,7 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         && out.format == Format::Json
         && matches!(
             (name, &result),
-            ("find", Outcome::Empty) | ("diff", Outcome::NoChanges)
+            ("find" | "log", Outcome::Empty) | ("diff", Outcome::NoChanges)
         )
     {
         println!("null");
