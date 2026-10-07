@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0]
+
+### Added
+
+- `acus guard` names the refused part of a compound command: the reason quotes the segment, says that no part of the command ran, and shows the acus command to run in its place (`acus find` with the grep flags carried over, `acus show path:A-B` for `head`/`sed -n`/`Get-Content -TotalCount`, `acus patch` with `*** Replace All: FILES` for `sed -i`), so the retry is one step.
+- `acus guard` on Windows and PowerShell: `findstr` (cmd.exe and PowerShell, `/s /i /n /c:`), `type` and `more` reads, `grep.exe`-style and backslash command paths, `Get-ChildItem … | Select-String` pipelines (`gci`, `ls`, `dir`), `ls -r` and any `-Recurse` abbreviation as a recursive listing, `-creplace`/`-ireplace` and `.Replace()` edits written with `sc`, `Out-File`, `>` or `WriteAllText`, `ReadAllText` reads of source files, comma-separated `Get-Content a.rs,b.rs`, and `-Wait` followed like `tail -f`.
+- `acus find` accepts `-r`, `-R` and `-H` as no-ops, like `-n`. Other grep and rg flags it lacks (`-c`, `-v`, `-o`, `-x`, `-m`, `--include`, `--exclude`) fail as before, now with a hint at the nearest `acus find` equivalent and `acus find --help`, also inside `acus run`.
+- `acus patch --help` documents the patch format, including `*** Replace All: PATH [PATH...]` with its literal and regex blocks. `skill/SKILL.md` and the README describe it too.
+
+### Changed
+
+- `acus guard` no longer refuses `cat`, `head`, `tail`, `type` or `Get-Content` of `.json`, `.toml`, `.yaml` and `.yml` files, which agents read whole on purpose (the Read tool already leaves them alone). `sed -i` on them is still refused.
+- `acus guard` no longer refuses `grep`, `rg`, `findstr` or `Select-String` on plain files that are not source (`.log`, `.txt`, `.csv`, data formats, `*.log` globs) or on stdin (`grep -c x <<< "$v"`, `grep -l x <(cmd)`). A directory, a glob, a variable, no operand with `rg`, `-r`, or a source file still counts as a code search.
+- `acus guard` treats `cat a.rs >> all.txt` and `cat a.rs b.rs > all.txt` as copies, as before, but `2>&1` and `2>/dev/null` no longer make `cat a.rs 2>&1` look like one.
+- `acus guard` also refuses `find … -exec grep` and `grep` inside `env`, `uv run` and `xargs` wrappers by their real command name.
+- `acus patch` errors for a `-` or SEARCH line that holds only part of a line point at `*** Replace All: PATH` with a SEARCH or REGEX block in every case (before, only some). An unknown `***` directive lists every accepted form with its arguments and suggests the right one for a near miss (`*** Replace all:`, `*** Replace All:src`); a `<<<<<<< REGEX` block under `Update File` says it belongs under `Replace All`.
+
+### Fixed
+
+- `acus guard` parsed an escaped quote inside double quotes as the end of the string, which hid the commands after it; in PowerShell, backslash is a path character and the backtick the escape, so `ls src\; Select-String x a.rs` is two commands.
+
 ## [0.7.1]
 
 ### Changed

@@ -72,8 +72,8 @@ fn ${1}_new(
 *** After: src/b.rs#main
 ```
 
-- SEARCH/REPLACE inside `Update File` matches whole lines (an `@@` line before it narrows the place).
-- `Replace All` takes files, directories and globs and changes every occurrence; a block that matches nothing fails the patch.
+- `-`, context and SEARCH lines inside `Update File` match whole lines (an `@@` line before it narrows the place). For part of a line, use `Replace All`.
+- `*** Replace All: PATH [PATH...]` takes space-separated files, directories and globs (`*.py`, matched below the current directory) and changes every occurrence. Each block after it is `<<<<<<< SEARCH` (literal, whitespace-exact, may span lines) or `<<<<<<< REGEX` (Rust regex run per file with `(?m)`; `${1}` in the replacement), then `=======` and `>>>>>>> REPLACE`. A block that matches nothing fails the patch. `acus patch --help` shows the full syntax.
 - `Delete Symbol` and `Move Symbol` take the doc comments and attributes along; `Move Symbol` needs `*** Before:` or `*** After: path#Sym`, or `*** To: path`.
 
 Batch lookups, one command per line:

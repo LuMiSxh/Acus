@@ -723,6 +723,9 @@ fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<us
 }
 
 /// Why the closest candidate failed, so the agent can fix the hunk without re-reading the file.
+/// What to do when a `-` line holds only part of a line.
+const PART_OF_LINE: &str = "for part of a line use `*** Replace All: PATH` with a `<<<<<<< SEARCH` block (literal text) or a `<<<<<<< REGEX` block, see `acus patch --help`";
+
 fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
     let first = old[j].trim();
     // Report the candidate that matches the longest run of lines, not just the first one.
@@ -740,10 +743,10 @@ fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
         .max_by_key(|&(k, i, _)| (k, std::cmp::Reverse(i)));
     if let Some((k, i, start)) = best {
         let found = lines.get(start + k).map_or("end of file", |l| l.as_str());
-        let part = if !old[k].trim().is_empty() && found.trim().starts_with(old[k].trim()) {
-            " (lines must match whole, not just their start)"
+        let part = if !old[k].trim().is_empty() && found.contains(old[k].trim()) {
+            format!(" (lines must match whole, not just a part of them; {PART_OF_LINE})")
         } else {
-            ""
+            String::new()
         };
         return format!(
             "hint: {k} lines match from line {}, but line {} is `{found}`, not `{}`{part}",
@@ -762,12 +765,14 @@ fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
             "only contains"
         };
         return format!(
-            "hint: line {} {how} it; context, `-` and SEARCH lines must be whole lines (for part of a line use `*** Replace All: path`): `{}`",
+            "hint: line {} {how} it; context, `-` and SEARCH lines must be whole lines ({PART_OF_LINE}): `{}`",
             i + 1,
             lines[i].trim()
         );
     }
-    "hint: re-read the file (acus show) and retry".into()
+    format!(
+        "hint: re-read the file (acus show) and retry; context, `-` and SEARCH lines must match whole lines ({PART_OF_LINE})"
+    )
 }
 
 /// Writes every dirty file to a temp file next to it, then renames them all into place.

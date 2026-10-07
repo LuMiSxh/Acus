@@ -72,6 +72,47 @@ fn find_rg_habits() {
 }
 
 #[test]
+fn find_accepts_recursive_grep_habits_and_explains_the_rest() {
+    for flags in [["-rn"], ["-rnH"], ["-R"], ["-nH"]] {
+        let (code, _, err) = acus(&["find", "needle", flags[0]]);
+        assert_eq!(code, 0, "{flags:?}: {err}");
+    }
+    for (flag, near) in [
+        ("-c", "acus find -l PAT"),
+        ("-v", "cannot invert"),
+        ("--count", "acus find -l PAT"),
+        ("-o", "whole matching lines"),
+        ("--include=*.rs", "-g '*.ext'"),
+        ("--bogus", "that flag does not exist"),
+    ] {
+        let (code, out, err) = acus(&["find", "needle", flag]);
+        assert_eq!((code, out.as_str()), (2, ""), "{flag}");
+        assert!(err.contains("unexpected argument"), "{flag}: {err}");
+        assert!(
+            err.contains("hint: ") && err.contains(near),
+            "{flag}: {err}"
+        );
+        assert!(err.contains("`acus find --help`"), "{flag}: {err}");
+    }
+    // Other commands keep clap's plain error, and `run` carries the hint into its entry.
+    let (_, _, err) = acus(&["outline", "src", "-c"]);
+    assert!(!err.contains("hint:"), "{err}");
+    let (_, out, _) = acus_in(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj")),
+        &["run"],
+        "[[\"find\", \"needle\", \"-v\"]]",
+    );
+    assert!(out.contains("hint: `acus find` cannot invert"), "{out}");
+}
+
+#[test]
+fn patch_help_documents_replace_all() {
+    let (code, out, _) = acus(&["patch", "--help"]);
+    assert_eq!(code, 0);
+    insta::assert_snapshot!(&out[out.find("PATCH FORMAT").unwrap()..]);
+}
+
+#[test]
 fn find_nothing_exits_1() {
     assert_eq!(
         acus(&["find", "zzz_not_here"]),
@@ -279,6 +320,44 @@ fn guard_answers_hook_calls() {
     assert!(out.contains("acus-skip"), "{out}");
     let out = guard(serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
     assert_eq!(out, "");
+    let out = guard(serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd app && ls; cat settings.json; grep -n foo src/a.rs | head"},
+    }));
+    assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
+    assert!(out.contains("Nothing ran"), "{out}");
+    assert!(out.contains("`grep -n foo src/a.rs`"), "{out}");
+    assert!(out.contains("`acus find 'foo' 'src/a.rs'`"), "{out}");
+}
+
+#[test]
+fn guard_never_fails_on_malformed_input() {
+    for input in [
+        "",
+        "not json",
+        "[]",
+        "null",
+        r#"{"tool_name": "Bash"}"#,
+        r#"{"tool_name": "Bash", "tool_input": null}"#,
+        r#"{"tool_name": "Bash", "tool_input": {"command": 5}}"#,
+        r#"{"tool_name": "Bash", "tool_input": {"command": "grep -e '"}}"#,
+        r#"{"tool_name": "PowerShell", "tool_input": {"command": "findstr /é é"}}"#,
+        r#"{"tool_name": "Read", "tool_input": {"file_path": 7}}"#,
+        r#"{"tool_name": "Grep", "tool_input": {"pattern": 7}}"#,
+        r#"{"tool_name": 3}"#,
+    ] {
+        let (code, out, _) = acus_in(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &["guard"],
+            input,
+        );
+        // Exit 0 with nothing to say, or with a verdict for what could be read.
+        assert_eq!(code, 0, "{input}");
+        assert!(
+            out.is_empty() || out.starts_with(r#"{"hookSpecificOutput""#),
+            "{input}: {out}"
+        );
+    }
 }
 
 #[test]

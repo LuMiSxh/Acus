@@ -1,0 +1,41 @@
+---
+source: crates/acus-cli/tests/cli.rs
+expression: "&out[out.find(\"PATCH FORMAT\").unwrap()..]"
+---
+PATCH FORMAT (stdin or --file; all or nothing, nothing is written on an error):
+  *** Update File: PATH         then `@@ enclosing line` anchors and ` `, `-`, `+` lines, or
+                                SEARCH/REPLACE blocks; context, `-` and SEARCH lines are WHOLE lines
+  *** Add File: PATH            then `+` lines
+  *** Delete File: PATH
+  *** Replace Symbol: PATH#Symbol   then the new definition as `+` lines
+  *** Delete Symbol: PATH#Symbol
+  *** Move Symbol: PATH#Symbol      then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH
+
+PART OF A LINE: *** Replace All: PATH [PATH...]
+  Replaces every occurrence of a text in the files, directories (walked, .gitignore respected)
+  and globs (*.py, matched anywhere below the current directory) named after the colon,
+  separated by spaces. The text need not be a whole line and may span lines. Each block must
+  match at least once, or the patch fails. Literal and regex blocks mix, and apply in order:
+
+  *** Replace All: src *.md
+  <<<<<<< SEARCH
+  old_name(
+  =======
+  new_name(
+  >>>>>>> REPLACE
+  <<<<<<< REGEX
+  fn (\w+)_old\(
+  =======
+  fn ${1}_new(
+  >>>>>>> REPLACE
+
+  SEARCH is literal and whitespace-exact. REGEX is a Rust regex run per file with (?m);
+  `.` does not cross lines (use \n or (?s)) and the replacement may use ${1}, ${name}.
+
+Example (add --fmt to format the written files):
+  acus patch <<'PATCH'
+  *** Update File: src/lib.rs
+  @@ fn parse
+  -    let x = 1;
+  +    let x = 2;
+  PATCH

@@ -61,7 +61,11 @@ pub fn run(_: Args, out: &Out) -> Result<Outcome> {
             println!("{}", out.header(&format!(">>> acus {}", shown.join(" "))));
         }
         let res = Cli::try_parse_from(&argv)
-            .map_err(|e| anyhow::anyhow!(e.render().to_string().trim().to_owned()))
+            .map_err(|e| {
+                let hint = crate::find_flag_hint(&e, &argv)
+                    .map_or(String::new(), |h| format!("\nhint: {h}"));
+                anyhow::anyhow!("{}{hint}", e.render().to_string().trim())
+            })
             .and_then(|cli| execute(cli, true));
         std::io::stdout().flush().ok();
         match res {

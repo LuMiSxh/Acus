@@ -82,6 +82,36 @@ fn sym_addr(rest: &str, n: usize, directive: &str) -> Result<(String, String)> {
 }
 
 pub fn parse(text: &str) -> Result<Vec<Op>> {
+    /// The accepted directives, as the unknown-directive error lists them.
+    const DIRECTIVES: &str = "*** Add File: PATH | *** Update File: PATH | *** Delete File: PATH | *** Move to: PATH (after Update File) | *** Replace Symbol: PATH#Symbol | *** Delete Symbol: PATH#Symbol | *** Move Symbol: PATH#Symbol (then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH) | *** Replace All: PATH [PATH...] (files, directories or globs, then `<<<<<<< SEARCH` or `<<<<<<< REGEX`, `=======`, `>>>>>>> REPLACE`; see `acus patch --help`)";
+
+    /// `did you mean …` for a directive with the right name but the wrong case or spacing, such as
+    /// `*** Replace all:` or `*** Replace All:src`; empty otherwise.
+    fn did_you_mean(line: &str) -> String {
+        let name = line
+            .trim_start_matches('*')
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        let norm: String = name
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let form = match norm.as_str() {
+            "addfile" => "*** Add File: PATH",
+            "updatefile" => "*** Update File: PATH",
+            "deletefile" => "*** Delete File: PATH",
+            "moveto" => "*** Move to: PATH",
+            "replacesymbol" => "*** Replace Symbol: PATH#Symbol",
+            "deletesymbol" => "*** Delete Symbol: PATH#Symbol",
+            "movesymbol" => "*** Move Symbol: PATH#Symbol",
+            "replaceall" => "*** Replace All: PATH [PATH...]",
+            _ => return String::new(),
+        };
+        format!("did you mean `{form}` (exact case, one space after the colon, a path after it)? ")
+    }
+
     let mut ops: Vec<Op> = Vec::new();
     let mut stage: Stage = None;
     for (i, line) in text.trim_end().lines().enumerate() {
@@ -168,7 +198,8 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             });
         } else if line.starts_with("***") {
             bail!(
-                "patch line {n}: unknown directive `{line}`\nhint: use *** Add File:, *** Update File:, *** Delete File:, *** Move to:, *** Replace Symbol:, *** Delete Symbol:, *** Move Symbol: (+ *** Before:/After:/To:), *** Replace All:"
+                "patch line {n}: unknown directive `{line}`\nhint: {}accepted: {DIRECTIVES}",
+                did_you_mean(line)
             );
         } else {
             body(ops.last_mut(), line, n, &mut stage)?;
@@ -310,6 +341,9 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
                     c.new.push(rest.into());
                     c.added += 1;
                 }
+                _ if line.starts_with("<<<<<<< REGEX") => bail!(
+                    "patch line {n}: REGEX blocks belong under `*** Replace All: PATH`, not `*** Update File`\nhint: use `<<<<<<< SEARCH` here, or move the block under `*** Replace All: PATH [PATH...]`"
+                ),
                 _ => bail!(
                     "patch line {n}: expected ` `, `-`, `+` or `@@` at line start, got `{line}`"
                 ),
