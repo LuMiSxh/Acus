@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `acus update` sends a GitHub token with the release lookup (`GH_TOKEN`, `GITHUB_TOKEN`, else `gh auth token`), so the 60 per hour anonymous API limit of a shared IP no longer blocks it with a 403. A rejected token (401) retries anonymously; the download itself never carries the token.
+
 ## [0.7.1]
 
 ### Changed

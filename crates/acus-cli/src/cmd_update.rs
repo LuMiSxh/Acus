@@ -27,6 +27,7 @@ mod imp {
     use std::io::Read;
     use std::path::Path;
     use std::process::Command;
+    use std::process::Stdio;
 
     const REPO: &str = "LuMiSxh/Acus";
     /// Release archives are a few MB; ureq's default body limit is 10 MB.
@@ -97,9 +98,19 @@ mod imp {
 
     fn latest_tag() -> Result<String> {
         let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-        let v: serde_json::Value = agent()
-            .get(&url)
-            .call()
+        let call = |token: Option<String>| {
+            let mut request = agent().get(&url);
+            if let Some(token) = token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            request.call()
+        };
+        // A stale token answers 401 where the anonymous request would still work.
+        let response = match call(token()) {
+            Err(ureq::Error::StatusCode(401)) => call(None),
+            other => other,
+        };
+        let v: serde_json::Value = response
             .with_context(|| format!("cannot reach {url}"))?
             .body_mut()
             .read_json()?;
@@ -107,6 +118,24 @@ mod imp {
             .as_str()
             .map(String::from)
             .context("the latest release has no tag")
+    }
+
+    /// A GitHub token for the release lookup: anonymous API calls share a 60 per hour limit per IP,
+    /// which a shared address often exhausts. `GH_TOKEN` and `GITHUB_TOKEN` first, then the `gh` login.
+    /// Only the API request carries it; the download goes to github.com without.
+    fn token() -> Option<String> {
+        let from_env = ["GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|t| !t.trim().is_empty()));
+        from_env.or_else(|| {
+            let out = Command::new("gh")
+                .args(["auth", "token"])
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            let token = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+            (out.status.success() && !token.is_empty()).then_some(token)
+        })
     }
 
     fn download(url: &str) -> Result<Vec<u8>> {
