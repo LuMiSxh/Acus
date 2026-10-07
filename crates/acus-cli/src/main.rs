@@ -149,13 +149,57 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
     Ok(result)
 }
 
+/// A hint for a grep or rg flag that `acus find` lacks, printed after clap's own error; `args`
+/// is the whole command line, `acus` first.
+pub fn find_flag_hint(e: &clap::Error, args: &[String]) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let sub = args.iter().skip(1).find(|a| !a.starts_with('-'));
+    if e.kind() != ErrorKind::UnknownArgument || sub.map(String::as_str) != Some("find") {
+        return None;
+    }
+    let Some(ContextValue::String(flag)) = e.get(ContextKind::InvalidArg) else {
+        return None;
+    };
+    let flag = flag.split('=').next().unwrap_or(flag);
+    let near = match flag {
+        "-c" | "--count" => "`acus find -l PAT` lists each file with its number of hits",
+        "-v" | "--invert-match" => {
+            "`acus find` cannot invert a match; write the regex for the lines you want, or filter other output with `grep -v`"
+        }
+        "-o" | "--only-matching" => {
+            "`acus find` prints whole matching lines; `acus show path:A-B` prints a range"
+        }
+        "-x" | "--line-regexp" => "anchor the pattern instead: 'PAT' as '^PAT$'",
+        "-m" | "--max-count" => "`--max-hits N` caps the hits",
+        "-s" | "-S" | "--smart-case" | "--no-messages" => "`-i` ignores case",
+        "--include" => "`-g '*.ext'` includes files by glob",
+        "--exclude" | "--exclude-dir" => "`-g '!GLOB'` excludes files by glob",
+        "-L" | "--files-without-match" => "`acus find -l PAT` lists the files that match",
+        "--no-heading" | "--color" | "--no-line-number" | "--heading" | "--line-number" => {
+            "output is always grouped by file with line numbers; drop the flag"
+        }
+        _ => "that flag does not exist",
+    };
+    Some(format!(
+        "{near}; every flag is listed by `acus find --help`"
+    ))
+}
+
 fn main() -> ExitCode {
     // `acus … | head` should end quietly like other CLI tools, not panic on a closed pipe.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    match execute(Cli::parse(), false) {
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        let _ = e.print();
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(hint) = find_flag_hint(&e, &args) {
+            eprintln!("hint: {hint}");
+        }
+        std::process::exit(e.exit_code());
+    });
+    match execute(cli, false) {
         Ok(Outcome::Found | Outcome::NoChanges) => ExitCode::SUCCESS,
         Ok(Outcome::Empty) => ExitCode::from(1),
         Ok(Outcome::Exit(c)) => ExitCode::from(c),

@@ -222,25 +222,51 @@ fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
     ))
 }
 
-/// PowerShell: the same rules on the lowercased command, as cmdlets ignore case, plus
-/// `-replace … | Set-Content` edits.
+/// PowerShell: the same rules (cmdlets ignore case, so the rules see a lowercased command),
+/// plus `-replace … | Set-Content` edits and .NET file reads.
 fn check_ps(cmd: &str) -> Option<Verdict> {
     let c = cmd.to_lowercase();
-    let edit = (c.contains("-replace") || c.contains(".replace("))
-        && ["set-content", "out-file", "writealltext"]
-            .iter()
-            .any(|w| c.contains(w))
-        && c.split(|ch: char| ch.is_whitespace() || "()'\",;".contains(ch))
-            .any(is_code_path);
-    let v = if edit {
+    let words = |is_path: fn(&str) -> bool| {
+        c.split(|ch: char| ch.is_whitespace() || "()'\",;".contains(ch))
+            .filter(move |w| is_path(w))
+    };
+    let writes = [
+        "set-content",
+        "out-file",
+        "writealltext",
+        "writealllines",
+        "| sc ",
+        " > ",
+    ]
+    .iter()
+    .any(|w| c.contains(w));
+    let replaces = ["-replace", "-creplace", "-ireplace", ".replace("]
+        .iter()
+        .any(|w| c.contains(w));
+    let v = if replaces && writes && words(is_code_path).next().is_some() {
+        let files: Vec<&str> = words(is_code_path).collect();
         Verdict::Deny(
             "ps-replace",
             format!(
-                "Use acus instead of -replace with Set-Content: one `acus patch` with `*** Replace All: PATHS` or SEARCH/REPLACE blocks edits every file at once and prints the written lines. {ESCAPE_PS}"
+                "Nothing ran: the command was refused as a whole because it rewrites {} with -replace. Use one `acus patch` with `*** Replace All: {}` and a SEARCH/REPLACE block (or SEARCH/REPLACE blocks under `*** Update File:`): it edits every file at once and prints the written lines. {ESCAPE_PS}",
+                files.join(", "),
+                files.join(" ")
+            ),
+        )
+    } else if ["readalltext", "readalllines", "readlines("]
+        .iter()
+        .any(|w| c.contains(w))
+        && words(is_source_path).next().is_some()
+        && !c.contains("acus ")
+    {
+        Verdict::Deny(
+            "read-shell",
+            format!(
+                "Nothing ran: the command was refused as a whole because it reads source files through .NET. Use acus instead: `acus show path path:A-B path#Symbol` reads several files, ranges or symbols in one call; `acus outline PATH` gives an overview. {ESCAPE_PS}"
             ),
         )
     } else {
-        match check(&c)? {
+        match check_in(cmd, true)? {
             Verdict::Deny(r, reason) => Verdict::Deny(r, reason.replace(ESCAPE, ESCAPE_PS)),
             v => v,
         }
@@ -292,9 +318,20 @@ fn unescape(seg: &str) -> (bool, &str) {
 
 /// What to do with `cmd`: refusing wins over hinting, `None` lets it run.
 fn check(cmd: &str) -> Option<Verdict> {
-    let (rest, docs) = strip_heredocs(cmd);
+    check_in(cmd, false)
+}
+
+/// `check` for Bash, or for PowerShell, where cmdlets ignore case: the rules see a lowercased
+/// command and a refusal quotes the original.
+fn check_in(cmd: &str, ps: bool) -> Option<Verdict> {
+    let low = if ps {
+        cmd.to_lowercase()
+    } else {
+        cmd.to_owned()
+    };
+    let (rest, docs) = strip_heredocs(&low);
     let scripts = docs.iter().filter_map(|(opener, body)| {
-        let interp = segments(opener).iter().find_map(|(seg, _)| {
+        let interp = segments(opener, ps).iter().find_map(|(seg, _)| {
             head(seg)
                 .map(|(h, _)| h.to_owned())
                 .filter(|h| is_interpreter(h))
@@ -302,26 +339,70 @@ fn check(cmd: &str) -> Option<Verdict> {
         })?;
         is_edit_script(body).then(|| script_hint(&interp))
     });
-    let segs = segments(&rest);
+    let segs = segments(&rest, ps);
+    let shown = segments(&strip_heredocs(cmd).0, ps);
     let mark = |esc: bool, v: Verdict| if esc { v.escaped() } else { v };
-    let filtered = segs.windows(2).filter_map(|w| {
+    // Each verdict with the first and last segment it is about.
+    // PowerShell reasons quote the original case; its segments line up with the lowercased ones.
+    let orig = if shown.len() == segs.len() {
+        &shown
+    } else {
+        &segs
+    };
+    let filtered = segs.windows(2).enumerate().filter_map(|(i, w)| {
         let (esc, seg) = unescape(&w[0].0);
-        filtered_build(seg, &w[1]).map(|v| mark(esc, v))
+        let build = filtered_build(seg, &w[1]).map(|v| (mark(esc, v), i, i + 1));
+        build.or_else(|| {
+            let (esc, seg) = unescape(&orig[i].0);
+            let v = listed_search(seg, &orig[i + 1], ps)?;
+            Some((mark(esc, v), i, i + 1))
+        })
     });
-    let v = segs
+    let (v, from, to) = segs
         .iter()
-        .filter_map(|(seg, piped)| {
+        .enumerate()
+        .filter_map(|(i, (seg, piped))| {
             let (esc, seg) = unescape(seg);
-            rule(seg, *piped).map(|v| mark(esc, v))
+            rule(seg, *piped, ps).map(|v| (mark(esc, v), i, i))
         })
         .chain(filtered)
-        .chain(scripts)
-        .min_by_key(|v| match v {
+        .chain(scripts.map(|v| (v, 0, 0)))
+        .min_by_key(|(v, ..)| match v {
             Verdict::Deny(..) => 0,
             Verdict::Hint(..) => 1,
             Verdict::Escape(_) => 2,
         })?;
+    let compound = segs.iter().filter(|(s, _)| !s.trim().is_empty()).count() > 1;
+    let v = match v {
+        // A refusal stops the whole command, so a compound one says which part and what to run.
+        Verdict::Deny(rule, reason) if compound => {
+            let at = |i: usize| orig[i].0.as_str();
+            let part = (from..=to).map(at).collect::<Vec<_>>().join(" | ");
+            let part = one_line(&part);
+            let instead = suggest(rule, at(from))
+                .filter(|s| s.len() <= 240)
+                .map_or("Replace that segment".to_owned(), |s| {
+                    format!("Replace it with {s}")
+                });
+            Verdict::Deny(
+                rule,
+                format!(
+                    "Nothing ran: the whole command was refused because of `{part}`; the other segments are fine. {instead} and send the command again. {reason}"
+                ),
+            )
+        }
+        v => v,
+    };
     Some(mark(cmd.contains("acus-skip"), v))
+}
+
+/// A segment on one line, cut to a length that reads in a refusal.
+fn one_line(s: &str) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match s.char_indices().nth(160) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s,
+    }
 }
 
 fn is_interpreter(head: &str) -> bool {
@@ -420,6 +501,62 @@ fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> 
     ))
 }
 
+/// PowerShell's way to grep: `Get-ChildItem … | Select-String PAT` searches the contents of the
+/// files listed. Narrowed to plain files (`-Include *.log`) it is a search of data and passes.
+fn listed_search(seg: &str, (next, piped): &(String, bool), ps: bool) -> Option<Verdict> {
+    let (filter, fargs) = head(next).filter(|_| ps && *piped)?;
+    let (lister, largs) = head(seg)?;
+    let (filter, lister) = (filter.to_lowercase(), lister.to_lowercase());
+    if !matches!(filter.as_str(), "select-string" | "sls")
+        || !matches!(lister.as_str(), "get-childitem" | "gci" | "ls" | "dir")
+    {
+        return None;
+    }
+    let (mut paths, mut globs) = (Vec::new(), Vec::new());
+    let mut words = largs;
+    while let Some(a) = words.next() {
+        match a.to_lowercase().as_str() {
+            // Only names are listed, nothing is searched.
+            "-name" => return None,
+            "-filter" | "-include" => {
+                globs.extend(
+                    words
+                        .next()
+                        .into_iter()
+                        .flat_map(|g| g.split(','))
+                        .map(unquote),
+                );
+            }
+            "-path" | "-literalpath" => paths.extend(words.next().map(unquote)),
+            "-exclude" | "-depth" | "-attributes" => {
+                words.next();
+            }
+            l if l.starts_with(['-', '/']) => {}
+            _ => paths.push(unquote(a)),
+        }
+    }
+    let named = if globs.is_empty() { &paths } else { &globs };
+    if !named.is_empty() && named.iter().all(|n| is_plain_file(n)) {
+        return None;
+    }
+    let fargs: Vec<&str> = fargs.collect();
+    let mut search = parse_search(&filter, &fargs);
+    search.operands = paths
+        .into_iter()
+        .filter(|p| !matches!(*p, "." | ".\\"))
+        .collect();
+    search
+        .flags
+        .extend(globs.iter().map(|g| format!("-g {}", quote(g))));
+    Some(Verdict::Deny(
+        "grep",
+        format!(
+            "Use acus instead of piping {lister} into {filter}: `{}` searches the same files and groups the hits by file and enclosing symbol. {ESCAPE}",
+            find_cmd(&search)
+        ),
+    ))
+}
+
 /// Edit scripts are only hinted at: telling them apart from data processing is a heuristic.
 fn script_hint(interp: &str) -> Verdict {
     Verdict::Hint(
@@ -430,40 +567,336 @@ fn script_hint(interp: &str) -> Verdict {
     )
 }
 
+/// Whitespace-separated words, with quoted text kept together (quotes included).
+fn split_words(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quote) = (None, None);
+    for (i, c) in s.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                start = start.or(Some(i));
+            }
+            (None, c) if c.is_whitespace() => out.extend(start.take().map(|st| &s[st..i])),
+            _ => start = start.or(Some(i)),
+        }
+    }
+    out.extend(start.map(|st| &s[st..]));
+    out
+}
+
+/// A command name: the file name without its directory (either separator) and `.exe`.
+fn command_name(w: &str) -> &str {
+    let w = w.trim_matches(['\'', '"']);
+    let w = w.rsplit(['/', '\\']).next().unwrap_or(w);
+    w.strip_suffix(".exe").unwrap_or(w)
+}
+
 /// The command word of a simple command, past assignments and keywords, and its arguments.
 fn head(seg: &str) -> Option<(&str, impl Iterator<Item = &str>)> {
-    let mut words = seg.split_whitespace().skip_while(|w| {
+    let mut words = split_words(seg).into_iter().skip_while(|w| {
         is_assignment(w) || matches!(*w, "do" | "then" | "else" | "{" | "!" | "time" | "sudo")
     });
-    let mut head = words.next()?.rsplit('/').next()?;
+    let mut head = command_name(words.next()?);
     if matches!(head, "uv" | "env" | "exec" | "npx" | "bunx") {
         // `uv run python …` runs the interpreter.
-        head = words
-            .by_ref()
-            .find(|w| !w.starts_with('-') && *w != "run")?;
+        head = command_name(
+            words
+                .by_ref()
+                .find(|w| !w.starts_with('-') && *w != "run" && !is_assignment(w))?,
+        );
     }
     Some((head, words))
 }
 
-fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
+/// Commands that search file contents; PowerShell and cmd.exe names included.
+const GREPS: &[&str] = &[
+    "grep",
+    "rg",
+    "egrep",
+    "fgrep",
+    "ag",
+    "ack",
+    "select-string",
+    "sls",
+    "findstr",
+];
+
+fn grep_reason(head: &str) -> String {
+    format!(
+        "Use acus instead of {head}: `acus find 'PAT' [PATH…]` (`--block` adds the enclosing code, `-l` lists files, `-w`, `-t TYPE`, `-g GLOB`, `-u --hidden` include ignored and hidden files). {ESCAPE}"
+    )
+}
+
+/// A search command's pattern, targets and the `acus find` flags that mean the same.
+#[derive(Default)]
+struct Search<'a> {
+    pattern: Option<&'a str>,
+    operands: Vec<&'a str>,
+    /// Searches the working directory when it names no file.
+    recursive: bool,
+    flags: Vec<String>,
+}
+
+/// The value of a short flag: the rest of its cluster (`-A3`) or the next word.
+fn flag_value<'a>(
+    cluster: &'a str,
+    at: usize,
+    words: &mut impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    match cluster.get(at + 1..) {
+        Some(v) if !v.is_empty() => Some(v),
+        _ => words.next(),
+    }
+}
+
+fn unquote(w: &str) -> &str {
+    w.trim_matches(['\'', '"'])
+}
+
+/// Reads grep, rg, `Select-String` and `findstr` arguments; unknown flags are skipped.
+fn parse_search<'a>(head: &str, args: &[&'a str]) -> Search<'a> {
+    // Select-String and findstr ignore case in their flags.
+    let ci = matches!(head, "select-string" | "sls" | "findstr");
+    let mut s = Search {
+        recursive: matches!(head, "rg" | "ag" | "ack"),
+        ..Search::default()
+    };
+    let mut have_pattern = false;
+    let mut words = args.iter().copied();
+    while let Some(raw) = words.next() {
+        let lc = if ci {
+            raw.to_lowercase()
+        } else {
+            raw.to_owned()
+        };
+        // Redirections are not operands; `< file` reads the file, `<<<` a string.
+        let r = raw.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if r.starts_with('>') {
+            if matches!(r, ">" | ">>") {
+                words.next();
+            }
+            continue;
+        }
+        if let Some(f) = r.strip_prefix('<') {
+            match f {
+                "<<" => {
+                    words.next();
+                }
+                "" | "<" => {}
+                f => s.operands.push(f),
+            }
+            continue;
+        }
+        if matches!(head, "select-string" | "sls") && raw.starts_with('-') {
+            match lc.as_str() {
+                "-pattern" => {
+                    have_pattern = true;
+                    s.pattern = words.next().map(unquote);
+                }
+                "-path" | "-literalpath" => s.operands.extend(
+                    words
+                        .next()
+                        .into_iter()
+                        .flat_map(|p| p.split(','))
+                        .map(unquote),
+                ),
+                "-include" | "-exclude" | "-context" | "-encoding" | "-inputobject" => {
+                    words.next();
+                }
+                "-simplematch" => s.flags.push("-F".into()),
+                "-list" => s.flags.push("-l".into()),
+                _ => {}
+            }
+            continue;
+        }
+        if head == "findstr"
+            && raw.starts_with('/')
+            && !raw.contains('\\')
+            && (raw.len() == 2 || raw.get(2..).is_some_and(|r| r.starts_with(':')))
+        {
+            match lc.as_bytes()[1] {
+                b's' => s.recursive = true,
+                b'i' => s.flags.push("-i".into()),
+                b'm' => s.flags.push("-l".into()),
+                b'c' | b'g' => {
+                    have_pattern = true;
+                    if lc.as_bytes()[1] == b'c' {
+                        s.pattern = raw.get(3..).map(unquote).filter(|p| !p.is_empty());
+                    }
+                    s.flags.push("-F".into());
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if raw == "-" {
+            continue;
+        }
+        if let Some(long) = raw.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, None), |(n, v)| (n, Some(v)));
+            match name {
+                "recursive" | "dereference-recursive" => s.recursive = true,
+                "ignore-case" => s.flags.push("-i".into()),
+                "word-regexp" => s.flags.push("-w".into()),
+                "files-with-matches" => s.flags.push("-l".into()),
+                "fixed-strings" => s.flags.push("-F".into()),
+                "regexp" | "file" => {
+                    have_pattern = true;
+                    let v = attached.or_else(|| words.next());
+                    if name == "regexp" {
+                        s.pattern = v.map(unquote);
+                    }
+                }
+                "include" | "glob" => {
+                    if let Some(v) = attached.or_else(|| words.next()) {
+                        s.flags.push(format!("-g {}", quote(unquote(v))));
+                    }
+                }
+                "context" | "after-context" | "before-context" => {
+                    attached.or_else(|| words.next());
+                    s.flags.push("--block".into());
+                }
+                "max-count" | "exclude" | "exclude-dir" | "max-depth" | "type" => {
+                    attached.or_else(|| words.next());
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if let Some(cluster) = raw.strip_prefix('-').filter(|c| !c.is_empty()) {
+            for (i, c) in cluster.char_indices() {
+                match c {
+                    'r' | 'R' if !matches!(head, "rg" | "ag" | "ack") => s.recursive = true,
+                    'i' => s.flags.push("-i".into()),
+                    'w' => s.flags.push("-w".into()),
+                    'l' => s.flags.push("-l".into()),
+                    'F' => s.flags.push("-F".into()),
+                    'e' | 'f' => {
+                        let v = flag_value(cluster, i, &mut words);
+                        have_pattern = true;
+                        if c == 'e' {
+                            s.pattern = v.map(unquote);
+                        }
+                        break;
+                    }
+                    'g' | 't' => {
+                        if let Some(v) = flag_value(cluster, i, &mut words) {
+                            s.flags.push(if c == 'g' {
+                                format!("-g {}", quote(unquote(v)))
+                            } else {
+                                format!("-t {}", unquote(v))
+                            });
+                        }
+                        break;
+                    }
+                    'm' | 'd' | 'D' | 'T' | 'j' | 'M' => {
+                        flag_value(cluster, i, &mut words);
+                        break;
+                    }
+                    'A' | 'B' | 'C' => {
+                        flag_value(cluster, i, &mut words);
+                        s.flags.push("--block".into());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if have_pattern {
+            s.operands.push(unquote(raw));
+        } else {
+            have_pattern = true;
+            s.pattern = Some(unquote(raw));
+        }
+    }
+    // Select-String ignores case unless told otherwise.
+    if matches!(head, "select-string" | "sls")
+        && !args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("-casesensitive"))
+    {
+        s.flags.push("-i".into());
+    }
+    s.flags.dedup();
+    s
+}
+
+/// The `acus find` call that does what `s` did.
+fn find_cmd(s: &Search) -> String {
+    let mut cmd = format!("acus find {}", quote(s.pattern.unwrap_or("PAT")));
+    for o in &s.operands {
+        cmd += &format!(" {}", quote(o));
+    }
+    for f in &s.flags {
+        cmd += &format!(" {f}");
+    }
+    cmd
+}
+
+/// An operand that is clearly not source: a file with an extension that is neither code nor
+/// has wildcards (logs, text, data formats).
+fn is_plain_file(w: &str) -> bool {
+    let w = unquote(w);
+    let name = w.rsplit(['/', '\\']).next().unwrap_or(w);
+    name.rsplit_once('.').is_some_and(|(_, e)| {
+        !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()) && !is_source_path(name)
+    })
+}
+
+/// Whether a search is aimed at source: it names a directory, a glob or a source file, or
+/// walks the working directory. A search of stdin or of plain files is left alone.
+fn aims_at_source(s: &Search, via_xargs: bool) -> bool {
+    via_xargs
+        || if s.operands.is_empty() {
+            s.recursive
+        } else {
+            !s.operands.iter().all(|o| is_plain_file(o))
+        }
+}
+
+/// Output sent to a file (`> x`, `>> x`, `1> x`), which makes a command a copy or an append
+/// rather than a read. Stderr redirects do not count.
+fn redirects_stdout(args: &[&str]) -> bool {
+    args.iter().any(|a| {
+        let a = a.trim_start_matches('1');
+        a.starts_with('>') && !a.starts_with(">&")
+    })
+}
+
+fn rule(seg: &str, mut piped: bool, ps: bool) -> Option<Verdict> {
     let (mut head, mut words) = head(seg)?;
     if is_interpreter(head) {
         // Inline `-c` / `-e` scripts sit in the segment itself.
         return is_edit_script(seg).then(|| script_hint(head));
     }
-    if head == "xargs" {
+    let via_xargs = head == "xargs";
+    if via_xargs {
         // `… | xargs grep` searches the files it is given.
-        head = words.by_ref().find(|w| !w.starts_with('-'))?;
+        head = command_name(words.by_ref().find(|w| !w.starts_with('-'))?);
         piped = false;
     }
     let args: Vec<&str> = words.collect();
     let in_place = args.iter().any(|a| {
         *a == "--in-place" || (a.starts_with('-') && !a.starts_with("--") && a.contains('i'))
     });
-    let code_file = args
+    // JSON, TOML and YAML are data, read whole on purpose; they do not count as source here.
+    let source_file = args
         .iter()
-        .any(|a| is_code_path(a.trim_matches(['\'', '"'])));
-    if is_listing(head, &args) {
+        .any(|a| unquote(a).split(',').any(is_source_path));
+    // `find … -exec grep …` searches the files it finds.
+    if head == "find"
+        && let Some(i) = args.iter().position(|a| matches!(*a, "-exec" | "-execdir"))
+        && let Some(&exec) = args.get(i + 1).filter(|c| GREPS.contains(&command_name(c)))
+    {
+        return Some(Verdict::Deny("grep", grep_reason(command_name(exec))));
+    }
+    if is_listing(head, &args, ps) {
         return Some(Verdict::Hint("tree", TREE_HINT.into()));
     }
     if head == "git" {
@@ -471,24 +904,24 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
     }
     // PowerShell cmdlets and aliases (lowercased by `check_ps`) share the rules.
     let (name, reason) = match head {
-        "grep" | "rg" | "egrep" | "fgrep" | "ag" | "ack" | "select-string" | "sls" if !piped => (
-            "grep",
-            format!(
-                "Use acus instead of {head}: `acus find 'PAT' [PATH…]` (`--block` adds the enclosing code, `-l` lists files, `-w`, `-t TYPE`, `-g GLOB`, `-u --hidden` include ignored and hidden files). {ESCAPE}"
-            ),
-        ),
+        h if GREPS.contains(&h) && !piped && aims_at_source(&parse_search(h, &args), via_xargs) => {
+            ("grep", grep_reason(h))
+        }
         "sed" | "perl" if in_place => (
             "sed-i",
             format!(
                 "Use acus instead of {head} -i: one `acus patch` with `*** Replace All: PATHS` or SEARCH/REPLACE blocks edits every file at once and prints the written lines. {ESCAPE}"
             ),
         ),
-        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "less" | "get-content" | "gc" | "type"
+        "sed" | "cat" | "head" | "tail" | "nl" | "bat" | "less" | "more" | "get-content" | "gc"
+        | "type"
             if !piped
-                && code_file
-                && !seg.contains('>')
+                && source_file
+                && !redirects_stdout(&args)
                 && (head != "sed" || args.contains(&"-n"))
-                && !args.iter().any(|a| matches!(*a, "-f" | "-F")) =>
+                && !args
+                    .iter()
+                    .any(|a| matches!(*a, "-f" | "-F" | "-wait" | "--follow")) =>
         {
             (
                 "read-shell",
@@ -500,6 +933,86 @@ fn rule(seg: &str, mut piped: bool) -> Option<Verdict> {
         _ => return None,
     };
     Some(Verdict::Deny(name, reason))
+}
+
+/// What to run instead of the segment a rule refused, when it can be worked out.
+fn suggest(rule: &str, seg: &str) -> Option<String> {
+    let (head, words) = head(seg)?;
+    let head = head.to_lowercase();
+    let args: Vec<&str> = words.collect();
+    match rule {
+        "grep" if GREPS.contains(&head.as_str()) => {
+            Some(format!("`{}`", find_cmd(&parse_search(&head, &args))))
+        }
+        "read-shell" => show_cmd(&head, &args),
+        "sed-i" => {
+            let files: Vec<&str> = args
+                .iter()
+                .map(|a| unquote(a))
+                .filter(|a| is_code_path(a))
+                .collect();
+            let files = if files.is_empty() {
+                "PATHS".to_owned()
+            } else {
+                files.join(" ")
+            };
+            Some(format!(
+                "`acus patch` with `*** Replace All: {files}` and a SEARCH/REPLACE block"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The `acus show` call for a `cat`, `head`, `sed -n 'A,Bp'` or `Get-Content` read.
+fn show_cmd(head: &str, args: &[&str]) -> Option<String> {
+    let (mut files, mut first, mut range): (Vec<&str>, Option<usize>, Option<(usize, usize)>) =
+        (vec![], None, None);
+    let mut words = args.iter().copied();
+    while let Some(a) = words.next() {
+        let lc = a.to_lowercase();
+        let count = |v: Option<&str>| v.and_then(|v| v.parse::<usize>().ok());
+        match lc.as_str() {
+            "-n" if head != "sed" => {
+                let n = count(words.next());
+                if head != "tail" {
+                    first = first.or(n);
+                }
+            }
+            "-totalcount" | "-head" | "-first" => first = first.or(count(words.next())),
+            "-tail" | "-last" | "-encoding" | "-delimiter" => {
+                words.next();
+            }
+            "-path" | "-literalpath" => files.extend(words.next().map(unquote)),
+            l if l.starts_with('-') => {
+                // `head -20` and `head -n20`.
+                if head == "head" {
+                    first = first.or(l[1..].trim_start_matches('n').parse().ok());
+                }
+            }
+            _ => {
+                let a = unquote(a);
+                match a
+                    .strip_suffix('p')
+                    .map(|r| r.split_once(',').unwrap_or((r, r)))
+                {
+                    Some((x, y)) if head == "sed" && x.parse::<usize>().is_ok() => {
+                        range = x.parse().ok().zip(y.parse().ok());
+                    }
+                    _ => files.extend(a.split(',').filter(|f| is_code_path(f))),
+                }
+            }
+        }
+    }
+    files.dedup();
+    let [file] = files.as_slice() else {
+        return (!files.is_empty()).then(|| format!("`acus show {}`", files.join(" ")));
+    };
+    let range = range.or(first.map(|n| (1, n)));
+    Some(match range {
+        Some((a, b)) => format!("`acus show {}`", quote(&format!("{file}:{a}-{b}"))),
+        None => format!("`acus show {}`", quote(file)),
+    })
 }
 
 /// Plain `git status|diff|log|show` print more than an agent needs; `acus diff` and `acus log` group
@@ -585,7 +1098,7 @@ fn git_hint(args: &[&str]) -> Option<Verdict> {
 
 /// Recursive directory listings: `tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`.
 /// A name filter or wildcard makes it a file search, which stays unhinted.
-fn is_listing(head: &str, args: &[&str]) -> bool {
+fn is_listing(head: &str, args: &[&str], ps: bool) -> bool {
     const FIND_FILTERS: &[&str] = &[
         "-name", "-iname", "-path", "-ipath", "-regex", "-exec", "-execdir", "-delete", "-newer",
         "-mtime", "-mmin", "-size", "-empty", "-perm", "-user",
@@ -593,12 +1106,17 @@ fn is_listing(head: &str, args: &[&str]) -> bool {
     let short = |a: &&&str| a.starts_with('-') && !a.starts_with("--");
     match head {
         "tree" => true,
-        "ls" => args.iter().filter(short).any(|a| a.contains('R')) || args.contains(&"--recursive"),
-        "get-childitem" | "gci" | "dir" => {
-            args.iter().any(|a| matches!(*a, "-recurse" | "-r" | "/s"))
-                && !args
-                    .iter()
-                    .any(|a| a.contains('*') || matches!(*a, "-filter" | "-include"))
+        "ls" if !ps => {
+            args.iter().filter(short).any(|a| a.contains('R')) || args.contains(&"--recursive")
+        }
+        // `-r` is `-Recurse` in PowerShell, any prefix of it being enough.
+        "get-childitem" | "gci" | "dir" | "ls" if ps || head != "ls" => {
+            args.iter().any(|a| {
+                let name = a.split(':').next().unwrap_or(a);
+                *a == "/s" || (name.len() > 1 && "-recurse".starts_with(name))
+            }) && !args
+                .iter()
+                .any(|a| a.contains('*') || matches!(*a, "-filter" | "-include"))
         }
         "find" => !args.iter().any(|a| FIND_FILTERS.contains(a)),
         _ => false,
@@ -606,7 +1124,18 @@ fn is_listing(head: &str, args: &[&str]) -> bool {
 }
 
 fn is_code_path(w: &str) -> bool {
-    !w.starts_with('-') && w.rsplit_once('.').is_some_and(|(_, e)| CODE.contains(&e))
+    !w.starts_with('-')
+        && w.rsplit_once('.')
+            .is_some_and(|(_, e)| CODE.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Source rather than data: `.json`, `.toml` and `.yaml` files are config and data, which agents
+/// read whole on purpose (the Read tool leaves them alone, too).
+fn is_source_path(w: &str) -> bool {
+    is_code_path(w)
+        && !w.rsplit_once('.').is_some_and(|(_, e)| {
+            ["json", "toml", "yaml", "yml"].contains(&e.to_ascii_lowercase().as_str())
+        })
 }
 
 fn is_assignment(w: &str) -> bool {
@@ -644,7 +1173,7 @@ fn strip_heredocs(cmd: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Simple commands outside quotes, each with whether it reads a pipe.
-fn segments(cmd: &str) -> Vec<(String, bool)> {
+fn segments(cmd: &str, ps: bool) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let (mut cur, mut piped) = (String::new(), false);
     let mut quote = None;
@@ -652,6 +1181,15 @@ fn segments(cmd: &str) -> Vec<(String, bool)> {
     let mut cut = |cur: &mut String, piped: bool| out.push((std::mem::take(cur), piped));
     while let Some(c) = chars.next() {
         match (quote, c) {
+            // Inside double quotes an escaped quote does not end the string.
+            (Some('"'), '\\') if !ps => {
+                cur.push(c);
+                cur.extend(chars.next());
+            }
+            (Some('"'), '`') if ps => {
+                cur.push(c);
+                cur.extend(chars.next());
+            }
             (Some(q), _) => {
                 if c == q {
                     quote = None;
@@ -662,7 +1200,12 @@ fn segments(cmd: &str) -> Vec<(String, bool)> {
                 quote = Some(c);
                 cur.push(c);
             }
-            (None, '\\') => {
+            // Backslash is a path separator in PowerShell, whose escape is the backtick.
+            (None, '\\') if !ps => {
+                cur.push(c);
+                cur.extend(chars.next());
+            }
+            (None, '`') if ps => {
                 cur.push(c);
                 cur.extend(chars.next());
             }
@@ -687,6 +1230,312 @@ fn segments(cmd: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    /// The reason of a refused command.
+    fn deny(v: Option<Verdict>) -> (&'static str, String) {
+        match v {
+            Some(Verdict::Deny(r, reason)) => (r, reason),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn names_the_refused_segment_and_its_replacement_in_compound_commands() {
+        let (rule, r) = deny(check("cd X && ls a b; cat src/a.rs; acus find foo"));
+        assert_eq!(rule, "read-shell");
+        assert!(r.starts_with("Nothing ran: the whole command was refused because of `cat src/a.rs`; the other segments are fine."), "{r}");
+        assert!(r.contains("Replace it with `acus show 'src/a.rs'`"), "{r}");
+
+        let (rule, r) = deny(check(
+            "cmd1 && grep -n -i 'foo bar' src file.log | head && cmd3",
+        ));
+        assert_eq!(rule, "grep");
+        assert!(
+            r.contains("because of `grep -n -i 'foo bar' src file.log`"),
+            "{r}"
+        );
+        assert!(
+            r.contains("`acus find 'foo bar' 'src' 'file.log' -i`"),
+            "{r}"
+        );
+
+        let (_, r) = deny(check("cd app && cargo test -q | tail -5 && echo done"));
+        assert!(r.contains("because of `cargo test -q | tail -5`"), "{r}");
+        assert!(r.contains("acus ctx 'cargo test -q'"), "{r}");
+
+        let (_, r) = deny(check("cd a && head -n 20 src/a.rs"));
+        assert!(r.contains("`acus show 'src/a.rs:1-20'`"), "{r}");
+        let (_, r) = deny(check("cd a && sed -n '10,20p' src/a.rs"));
+        assert!(r.contains("`acus show 'src/a.rs:10-20'`"), "{r}");
+        let (_, r) = deny(check("true && cat a.rs b.rs"));
+        assert!(r.contains("`acus show a.rs b.rs`"), "{r}");
+        let (_, r) = deny(check("cd x && sed -i 's/a/b/' a.rs b.rs"));
+        assert!(r.contains("`*** Replace All: a.rs b.rs`"), "{r}");
+        let (_, r) = deny(check("cd x && rg -n --glob '*.rs' -w foo"));
+        assert!(r.contains("`acus find 'foo' -g '*.rs' -w`"), "{r}");
+
+        // The escape hint stays, and a lone command is not called compound.
+        assert!(r.ends_with("`command ` prefix."), "{r}");
+        let (_, r) = deny(check("cat src/a.rs"));
+        assert!(!r.contains("Nothing ran"), "{r}");
+
+        // Long segments are cut.
+        let (_, r) = deny(check(&format!("cd x && cat {}.rs", "a".repeat(400))));
+        assert!(r.contains('…') && r.len() < 700, "{r}");
+    }
+
+    #[test]
+    fn leaves_data_files_plain_files_and_other_commands_output_alone() {
+        // Decisions: JSON, TOML and YAML are data, read whole on purpose (the Read tool agrees);
+        // searching a log or text file is not a code search; a pipe or stdin is another
+        // command's output; `>`/`>>` make a read a copy or an append.
+        for cmd in [
+            "cat .claude/settings.local.json",
+            "cat Cargo.toml",
+            "head -20 config.yaml",
+            "tail -n 5 data.yml",
+            "grep version Cargo.toml",
+            "grep -c error build.log",
+            "grep -n TODO notes.txt out.csv",
+            "grep -l foo *.log",
+            "cmd | grep -c foo",
+            "cmd | grep -l foo",
+            "grep -c foo <(cmd)",
+            "grep -q foo <<< \"$out\"",
+            "grep -c foo < results.log",
+            "grep -c foo",
+            "cat a.rs >> all.txt",
+            "cat a.rs b.rs > all.txt",
+            "cat a.rs 1> all.txt",
+            "cat > conf.json <<'EOF'\n{}\nEOF",
+            "cat > notes.md <<'EOF'\ngrep foo src\nEOF",
+            "git log --oneline 2>&1 | grep -c fix",
+        ] {
+            assert_eq!(check(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn still_refuses_source_reads_and_searches_that_look_harmless() {
+        for cmd in [
+            "cat src/a.rs 2>&1",
+            "cat src/a.rs 2>/dev/null",
+            "cat settings.json src/a.rs",
+            "grep foo src/a.rs",
+            "grep -c foo README.md",
+            "grep -rn foo .",
+            "grep -l foo src",
+            "grep -c foo *",
+            "grep -c foo $file",
+            "grep -c foo build.log src",
+            "grep -rn foo",
+            "rg foo",
+            "rg foo notes.txt src",
+            "sed -i '' 's/a/b/' config.json",
+            "find . -name '*.rs' -exec grep -n foo {} +",
+            "ls | xargs grep -c foo",
+            "env FOO=1 grep -rn foo src",
+        ] {
+            assert!(matches!(check(cmd), Some(Verdict::Deny(..))), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn recognises_windows_commands_in_either_shell() {
+        for (cmd, rule) in [
+            ("grep.exe -rn foo src", "grep"),
+            (
+                "'C:\\Program Files\\Git\\usr\\bin\\grep.exe' -n x a.rs",
+                "grep",
+            ),
+            (r"C:\tools\rg.exe foo", "grep"),
+            ("findstr /s /i foo *.rs", "grep"),
+            (r#"findstr /n /c:"two words" src\a.rs"#, "grep"),
+            (r"type src\a.rs", "read-shell"),
+            (r"more src\a.rs", "read-shell"),
+            (r"cd src && type a.rs b.rs", "read-shell"),
+        ] {
+            let Some(Verdict::Deny(r, _)) = check(cmd) else {
+                panic!("{cmd}");
+            };
+            assert_eq!(r, rule, "{cmd}");
+        }
+        for cmd in [
+            "findstr /i error build.log",
+            r#"findstr /c:"a b" out.txt"#,
+            r"type notes.txt",
+            r"type package.json",
+            "type a.rs > b.rs",
+        ] {
+            assert_eq!(check(cmd), None, "{cmd}");
+        }
+        assert!(matches!(check("dir /s"), Some(Verdict::Hint("tree", _))));
+        let (_, r) = deny(check(r#"cd x && findstr /n /c:"two words" src\a.rs"#));
+        assert!(r.contains(r"`acus find 'two words' 'src\a.rs' -F`"), "{r}");
+    }
+
+    #[test]
+    fn covers_powershell_habits() {
+        for (cmd, rule) in [
+            (r"gc -Raw src\a.rs", "read-shell"),
+            (r"Get-Content -TotalCount 5 .\src\a.rs", "read-shell"),
+            (r"Get-Content -Path 'src\a.rs' -Tail 5", "read-shell"),
+            ("Get-Content a.rs,b.txt", "read-shell"),
+            (r"cat -Raw a.rs", "read-shell"),
+            (r"type C:\repo\SRC\MAIN.RS", "read-shell"),
+            (r"sls foo src\*.rs", "grep"),
+            (r"Select-String -Pattern 'a b' -Path a.rs,b.rs", "grep"),
+            (r"& 'C:\tools\rg.exe' foo src", "grep"),
+            (r"findstr /s foo *.swift", "grep"),
+            (r"gci -Recurse -Filter *.rs | Select-String foo", "grep"),
+            (r"Get-ChildItem -Recurse | sls foo", "grep"),
+            (r"ls -r src | Select-String -Pattern foo", "grep"),
+            (r"dir *.rs | sls foo", "grep"),
+            (
+                r"(Get-Content a.rs) -creplace 'x','y' | sc a.rs",
+                "ps-replace",
+            ),
+            (
+                r"(gc a.rs -Raw).Replace('x','y') | Out-File a.rs",
+                "ps-replace",
+            ),
+            (r"(Get-Content a.rs) -replace 'x','y' > a.rs", "ps-replace"),
+            (
+                r"[IO.File]::WriteAllText('a.rs', [IO.File]::ReadAllText('a.rs').Replace('x','y'))",
+                "ps-replace",
+            ),
+            (r#"[System.IO.File]::ReadAllText("src\a.rs")"#, "read-shell"),
+            ("cargo build 2>&1 | select -First 20", "build-pipe"),
+        ] {
+            let Some(Verdict::Deny(r, reason)) = check_ps(cmd) else {
+                panic!("{cmd}");
+            };
+            assert_eq!(r, rule, "{cmd}");
+            assert!(reason.contains("# acus-skip"), "{cmd}: {reason}");
+        }
+        for cmd in [
+            "Get-Content app.log -Tail 20 -Wait",
+            "Get-Content settings.json -Raw",
+            "Get-Content out.txt | Select-String error",
+            "Select-String error build.log",
+            "Get-ChildItem -Recurse -Include *.log | Select-String error",
+            "gci *.txt | sls foo",
+            "gci -Name | sls foo",
+            "ls | Select-Object -First 3",
+            "Write-Host 'cat a.rs; sls x a.rs'",
+            "Set-Content notes.txt 'hello'",
+            r"(Get-Content notes.txt) -replace 'x','y' | Set-Content notes.txt",
+            r"[IO.File]::ReadAllText('data.json')",
+        ] {
+            assert_eq!(check_ps(cmd), None, "{cmd}");
+        }
+        for cmd in [
+            "ls -r src",
+            "gci -Rec",
+            "Get-ChildItem -Recurse -Depth 2",
+            "dir /s",
+        ] {
+            assert!(
+                matches!(check_ps(cmd), Some(Verdict::Hint("tree", _))),
+                "{cmd}"
+            );
+        }
+        // `ls -r` reverses in Bash.
+        assert_eq!(check("ls -r src"), None);
+    }
+
+    #[test]
+    fn powershell_separators_and_quoting_split_commands_the_same() {
+        // `;` everywhere, `&&` and `||` (PowerShell 7; Windows PowerShell 5.1 rejects them but
+        // the guard still sees the parts), backslashes are paths, quotes hide separators.
+        for cmd in [
+            r"cd src; Select-String foo a.rs",
+            r"cd src && Select-String foo a.rs",
+            r"cd src || Select-String foo a.rs",
+            r"ls src\; Select-String foo src\a.rs",
+            "Write-Host \"a`\";\" ; Get-Content a.rs",
+            "Write-Host 'it''s'; Get-Content a.rs",
+        ] {
+            assert!(matches!(check_ps(cmd), Some(Verdict::Deny(..))), "{cmd}");
+        }
+        let (_, r) = deny(check_ps(r"cd C:\Repo; Get-Content Src\Main.rs; Get-Date"));
+        assert!(r.contains(r"because of `Get-Content Src\Main.rs`"), "{r}");
+        assert!(r.contains(r"`acus show 'Src\Main.rs'`"), "{r}");
+        // The escape works on a refused segment of a compound command.
+        assert_eq!(
+            check_ps(r"cd src; Get-Content a.rs # acus-skip"),
+            Some(Verdict::Escape("read-shell"))
+        );
+    }
+
+    #[test]
+    fn never_panics_on_odd_input() {
+        for cmd in [
+            "",
+            " ",
+            "\"",
+            "'",
+            "`",
+            "\\",
+            "&",
+            "|",
+            "||",
+            "&&",
+            ";",
+            "(",
+            ")",
+            "<",
+            ">",
+            "<<<",
+            "<<",
+            "<<EOF",
+            "grep",
+            "grep -e",
+            "grep --regexp",
+            "grep --regexp=",
+            "grep -",
+            "grep --",
+            "grep -A",
+            "grep -efoo",
+            "rg -g",
+            "findstr",
+            "findstr /",
+            "findstr /c",
+            "findstr /c:",
+            "findstr /é",
+            "findstr /éa:x",
+            "sls -pattern",
+            "sls -path",
+            "sls -",
+            "gci -filter",
+            "gci | sls",
+            "head -n",
+            "head -é",
+            "sed -n",
+            "sed -n p",
+            "cat >",
+            "cat 2>",
+            "xargs",
+            "find -exec",
+            "env",
+            "uv run",
+            "cd",
+            "é",
+            "日本語 grep 日本語.rs",
+            "gc ,",
+            "gc ,a.rs",
+            "ls -",
+            "ls -r | sls -",
+            "'a b",
+            "\"a b",
+            "cat 'a.rs",
+            "cat \"a.rs",
+        ] {
+            let _ = check(cmd);
+            let _ = check_ps(cmd);
+            let _ = check_ps(&format!("cd x; {cmd}; {cmd} | {cmd}"));
+        }
+    }
+
     use super::{READ_MAX, Verdict, check, check_ps, grep_tool, read_verdict};
     use acus_syntax::Lang;
     use serde_json::json;

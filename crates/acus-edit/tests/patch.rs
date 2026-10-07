@@ -82,6 +82,62 @@ fn context_errors_point_at_the_near_miss() {
 }
 
 #[test]
+fn partial_line_errors_name_replace_all() {
+    let d = dir(&[("a.rs", "fn a() {\n    call(x, y);\n}\n")]);
+    let err = |p: &str| {
+        run(
+            d.path(),
+            &format!("*** Begin Patch\n*** Update File: a.rs\n{p}*** End Patch\n"),
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    // The first `-` line is part of a line.
+    let e = err("-call(x\n+call(z\n");
+    assert!(e.contains("line 2 only starts with it"), "{e}");
+    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
+    assert!(e.contains("`<<<<<<< REGEX`"), "{e}");
+    // A later line is part of a line, with the first one matching whole.
+    let e = err(" fn a() {\n-    call(x\n+    call(z\n");
+    assert!(e.contains("lines must match whole"), "{e}");
+    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
+    // Nothing similar at all.
+    let e = err("-nothing like it\n");
+    assert!(e.contains("must match whole lines"), "{e}");
+    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
+}
+
+#[test]
+fn unknown_directives_list_the_accepted_forms() {
+    let e = |p: &str| parse(p).unwrap_err().to_string();
+    let m = e("*** Replace all: src\n");
+    assert!(
+        m.contains("did you mean `*** Replace All: PATH [PATH...]`"),
+        "{m}"
+    );
+    assert!(
+        m.contains("*** Replace All: PATH [PATH...] (files, directories or globs"),
+        "{m}"
+    );
+    assert!(m.contains("`<<<<<<< SEARCH` or `<<<<<<< REGEX`"), "{m}");
+    assert!(m.contains("*** Update File: PATH"), "{m}");
+    assert!(e("*** Replace All:src\n").contains("did you mean"));
+    assert!(e("*** Replace All:\n").contains("did you mean"));
+    assert!(e("*** update file: a.rs\n").contains("did you mean `*** Update File: PATH`"));
+    let m = e("*** Bogus: x\n");
+    assert!(
+        !m.contains("did you mean") && m.contains("accepted: *** Add File: PATH"),
+        "{m}"
+    );
+    // A REGEX block only exists under Replace All.
+    let m = e("*** Update File: a.rs\n<<<<<<< REGEX\nx\n=======\ny\n>>>>>>> REPLACE\n");
+    assert!(
+        m.contains("REGEX blocks belong under `*** Replace All: PATH`"),
+        "{m}"
+    );
+}
+
+#[test]
 fn hunk_may_start_just_above_its_anchor() {
     let d = dir(&[("a.rs", "/// Old.\nfn a() {}\n")]);
     run(

@@ -34,9 +34,13 @@ pub struct Args {
     /// File type like rg: rs, rust, py, ts, js, swift, md, … (repeatable).
     #[arg(short = 't', long = "type")]
     types: Vec<String>,
-    /// Accepted for rg/grep habits; lines are always numbered.
+    /// Accepted for rg/grep habits; lines are always numbered, the search is always recursive.
     #[arg(short = 'n', hide = true)]
     _line_numbers: bool,
+    #[arg(short = 'r', short_alias = 'R', hide = true)]
+    _recursive: bool,
+    #[arg(short = 'H', hide = true)]
+    _with_filename: bool,
     /// Print enclosing symbol bodies instead of single lines.
     #[arg(long)]
     block: bool,
