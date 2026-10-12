@@ -22,12 +22,13 @@ pub fn run(_: Args, cfg: &Config) -> Result<Outcome> {
     let input = &v["tool_input"];
     let cwd = v["cwd"].as_str();
     let command = input["command"].as_str().unwrap_or_default();
+    let scope = Scope::new(cwd);
     let verdict = match v["tool_name"].as_str() {
-        Some("Read") => read_check(input, cwd),
+        Some("Read") => read_check(input, cwd, scope.as_ref()),
         Some("Grep") => grep_tool(input, cwd),
         Some("Glob") => Some(Verdict::Hint("glob-tool", GLOB_HINT.to_owned())),
-        Some("PowerShell") => check_ps(command),
-        _ => check(command),
+        Some("PowerShell") => check_ps_in(command, scope.as_ref()),
+        _ => check_in(command, false, scope.as_ref()),
     };
     let Some(verdict) = verdict else {
         return Ok(Outcome::Found);
@@ -139,9 +140,85 @@ const READ_MAX: usize = 300;
 /// Symbols listed when such a read is refused.
 const OUTLINE_MAX: usize = 60;
 
+/// The session's git repository, or its directory when it is in none. Reads of files outside it
+/// (`~/.claude`, `/tmp`, `~/.config`) are on purpose and are left alone.
+struct Scope {
+    cwd: PathBuf,
+    root: PathBuf,
+}
+
+impl Scope {
+    fn new(cwd: Option<&str>) -> Option<Scope> {
+        let cwd = PathBuf::from(cwd?);
+        let root = cwd
+            .ancestors()
+            .find(|d| d.join(".git").exists())
+            .unwrap_or(&cwd)
+            .to_path_buf();
+        let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        Some(Scope {
+            cwd: canon(cwd),
+            root: canon(root),
+        })
+    }
+
+    /// Whether `path` (absolute, relative to the session, `~/…` or `$HOME/…`) is in the
+    /// repository. A path that cannot be resolved (other variables) counts as inside.
+    fn inside(&self, path: &str) -> bool {
+        let p = unquote(path);
+        let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        let rest = p
+            .strip_prefix('~')
+            .or_else(|| p.strip_prefix("$HOME"))
+            .or_else(|| p.strip_prefix("${HOME}"))
+            .filter(|r| r.is_empty() || r.starts_with(['/', '\\']));
+        let path = match rest {
+            Some(r) => match home() {
+                Some(h) => PathBuf::from(h).join(r.trim_start_matches(['/', '\\'])),
+                None => return true,
+            },
+            None if p.starts_with('$') => return true,
+            None => PathBuf::from(p),
+        };
+        let mut full = PathBuf::new();
+        for c in self.cwd.join(path).components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    full.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => full.push(c),
+            }
+        }
+        // Resolve symlinks of the part that exists (`/tmp` is `/private/tmp` on macOS).
+        let mut base = full.clone();
+        let mut tail = PathBuf::new();
+        while !base.exists() {
+            let Some(name) = base.file_name().map(PathBuf::from) else {
+                break;
+            };
+            tail = name.join(&tail);
+            base.pop();
+        }
+        base.canonicalize()
+            .unwrap_or(base)
+            .join(tail)
+            .starts_with(&self.root)
+    }
+}
+
+/// Without a known session directory every path counts as inside.
+fn inside(scope: Option<&Scope>, path: &str) -> bool {
+    scope.is_none_or(|s| s.inside(path))
+}
+
 /// A whole read of a large source file: refused with the file's outline, so the agent can pick
 /// symbols or a range instead.
-fn read_check(input: &serde_json::Value, cwd: Option<&str>) -> Option<Verdict> {
+fn read_check(
+    input: &serde_json::Value,
+    cwd: Option<&str>,
+    scope: Option<&Scope>,
+) -> Option<Verdict> {
     if ["offset", "limit", "pages"]
         .iter()
         .any(|k| !input[k].is_null())
@@ -149,6 +226,9 @@ fn read_check(input: &serde_json::Value, cwd: Option<&str>) -> Option<Verdict> {
         return None;
     }
     let file = input["file_path"].as_str()?;
+    if !inside(scope, file) {
+        return None;
+    }
     let path = Path::new(file);
     // Data files are mostly read whole on purpose; their outline says little.
     let lang =
@@ -224,7 +304,12 @@ fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
 
 /// PowerShell: the same rules (cmdlets ignore case, so the rules see a lowercased command),
 /// plus `-replace … | Set-Content` edits and .NET file reads.
+#[cfg(test)]
 fn check_ps(cmd: &str) -> Option<Verdict> {
+    check_ps_in(cmd, None)
+}
+
+fn check_ps_in(cmd: &str, scope: Option<&Scope>) -> Option<Verdict> {
     let c = cmd.to_lowercase();
     let words = |is_path: fn(&str) -> bool| {
         c.split(|ch: char| ch.is_whitespace() || "()'\",;".contains(ch))
@@ -256,7 +341,7 @@ fn check_ps(cmd: &str) -> Option<Verdict> {
     } else if ["readalltext", "readalllines", "readlines("]
         .iter()
         .any(|w| c.contains(w))
-        && words(is_source_path).next().is_some()
+        && words(is_source_path).any(|w| inside(scope, w))
         && !c.contains("acus ")
     {
         Verdict::Deny(
@@ -266,7 +351,7 @@ fn check_ps(cmd: &str) -> Option<Verdict> {
             ),
         )
     } else {
-        match check_in(cmd, true)? {
+        match check_in(cmd, true, scope)? {
             Verdict::Deny(r, reason) => Verdict::Deny(r, reason.replace(ESCAPE, ESCAPE_PS)),
             v => v,
         }
@@ -317,13 +402,14 @@ fn unescape(seg: &str) -> (bool, &str) {
 }
 
 /// What to do with `cmd`: refusing wins over hinting, `None` lets it run.
+#[cfg(test)]
 fn check(cmd: &str) -> Option<Verdict> {
-    check_in(cmd, false)
+    check_in(cmd, false, None)
 }
 
 /// `check` for Bash, or for PowerShell, where cmdlets ignore case: the rules see a lowercased
 /// command and a refusal quotes the original.
-fn check_in(cmd: &str, ps: bool) -> Option<Verdict> {
+fn check_in(cmd: &str, ps: bool, scope: Option<&Scope>) -> Option<Verdict> {
     let low = if ps {
         cmd.to_lowercase()
     } else {
@@ -351,7 +437,9 @@ fn check_in(cmd: &str, ps: bool) -> Option<Verdict> {
     };
     let filtered = segs.windows(2).enumerate().filter_map(|(i, w)| {
         let (esc, seg) = unescape(&w[0].0);
-        let build = filtered_build(seg, &w[1]).map(|v| (mark(esc, v), i, i + 1));
+        let (_, oseg) = unescape(&orig[i].0);
+        let build =
+            filtered_build(seg, &w[1], oseg, &orig[i + 1].0).map(|v| (mark(esc, v), i, i + 1));
         build.or_else(|| {
             let (esc, seg) = unescape(&orig[i].0);
             let v = listed_search(seg, &orig[i + 1], ps)?;
@@ -363,7 +451,7 @@ fn check_in(cmd: &str, ps: bool) -> Option<Verdict> {
         .enumerate()
         .filter_map(|(i, (seg, piped))| {
             let (esc, seg) = unescape(seg);
-            rule(seg, *piped, ps).map(|v| (mark(esc, v), i, i))
+            rule(seg, *piped, ps, scope).map(|v| (mark(esc, v), i, i))
         })
         .chain(filtered)
         .chain(scripts.map(|v| (v, 0, 0)))
@@ -448,7 +536,14 @@ fn is_edit_script(s: &str) -> bool {
 
 /// A build or test piped into `tail`, `head` or `grep`: the cut output often hides the failure,
 /// and the build runs again to see more.
-fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> {
+/// `acus ctx '…' | tail` is refused too: ctx has `--tail` and `--grep`. `oseg` and `onext` are
+/// the segments in their original case, which the rewritten command quotes.
+fn filtered_build(
+    seg: &str,
+    (next, piped): &(String, bool),
+    oseg: &str,
+    onext: &str,
+) -> Option<Verdict> {
     let (filter, _) = head(next).filter(|_| *piped)?;
     if !matches!(
         filter,
@@ -465,7 +560,11 @@ fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> 
         return None;
     }
     let (build, args) = head(seg)?;
+    let args: Vec<&str> = args.collect();
+    let is_ctx = build == "acus" && args.first() == Some(&"ctx");
     let sub = args
+        .iter()
+        .copied()
         .filter(|a| !a.starts_with(['-', '+']))
         .find(|a| *a != "run");
     let is_build = match build {
@@ -484,21 +583,133 @@ fn filtered_build(seg: &str, (next, piped): &(String, bool)) -> Option<Verdict> 
         | "gradlew" | "mvn" | "dotnet" => true,
         _ => false,
     };
-    if !is_build {
+    if !is_build && !is_ctx {
         return None;
     }
-    let cmd = seg.trim().trim_end_matches("2>&1").trim_end();
+    let cmd = oseg.trim().trim_end_matches("2>&1").trim_end();
+    let flag =
+        head(onext).and_then(|(f, fargs)| ctx_flag(&f.to_lowercase(), &fargs.collect::<Vec<_>>()));
+    if is_ctx {
+        let reason = match flag {
+            Some((flag, what)) => format!(
+                "Use `{cmd} {flag}` instead of piping acus ctx into {filter}: the flag {what}, so no failure is cut away. {ESCAPE}"
+            ),
+            None => format!(
+                "Use acus ctx's own flags instead of piping it into {filter}: `acus ctx '…' --tail N` keeps the last N lines plus every failure with the code it points at, `--grep RE` keeps the lines matching RE plus the code they point at, `--max-output N` keeps the first and last N/2 lines. {ESCAPE}"
+            ),
+        };
+        return Some(Verdict::Deny("ctx-pipe", reason));
+    }
     let example = if cmd.contains('\'') {
         "acus ctx 'COMMAND'".to_owned()
     } else {
         format!("acus ctx '{cmd}'")
     };
-    Some(Verdict::Deny(
-        "build-pipe",
-        format!(
-            "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again (`acus ctx` alone runs the project's tests). {ESCAPE}"
+    let reason = match flag {
+        Some((flag, what)) => format!(
+            "Use `{example} {flag}` instead of piping {build} into {filter}: acus ctx drops build noise, the flag {what}, and the full log is saved for follow-up reads, so the build need not run again. {ESCAPE}"
         ),
-    ))
+        None => format!(
+            "Use acus instead of piping {build} into {filter}: `{example}` drops build noise, shows the failures with the code they point at, and saves the full log for follow-up reads, so the build need not run again (`acus ctx` alone runs the project's tests; `--tail N` keeps the last N lines plus the failures, `--grep RE` keeps matching lines plus their code). {ESCAPE}"
+        ),
+    };
+    Some(Verdict::Deny("build-pipe", reason))
+}
+
+/// The `acus ctx` flag that does what a `tail`, `head`, `grep` or PowerShell `Select-*` filter
+/// did, and what it does; `None` for options ctx has no equivalent of (`grep -v`, `tail -n +5`).
+/// Cmdlet switches ignore case; `filter` is lowercased, `args` keep their case.
+fn ctx_flag(filter: &str, args: &[&str]) -> Option<(String, String)> {
+    let ps = matches!(filter, "select-object" | "select" | "select-string" | "sls");
+    let key = |a: &str| if ps { a.to_lowercase() } else { a.to_owned() };
+    let mut it = args.iter().copied();
+    // `tail -n +5` counts from the start: no equivalent.
+    let count = |s: &str| s.parse::<usize>().ok().filter(|_| !s.starts_with('+'));
+    match filter {
+        "tail" | "head" | "select-object" | "select" => {
+            let mut last = filter == "tail";
+            let mut n = (!ps).then_some(10);
+            while let Some(a) = it.next() {
+                match key(a).as_str() {
+                    "-n" | "--lines" => n = Some(count(it.next()?)?),
+                    "-first" if ps => {
+                        last = false;
+                        n = Some(count(it.next()?)?);
+                    }
+                    "-last" if ps => {
+                        last = true;
+                        n = Some(count(it.next()?)?);
+                    }
+                    k if k.starts_with('-') => {
+                        let v = k
+                            .strip_prefix("--lines=")
+                            .or_else(|| k.strip_prefix("-n"))
+                            .or_else(|| k.strip_prefix('-'))?;
+                        n = Some(count(v)?);
+                    }
+                    _ => {}
+                }
+            }
+            let n: usize = n?;
+            Some(if last {
+                (
+                    format!("--tail {n}"),
+                    format!(
+                        "keeps the last {n} lines plus every failure with the code it points at"
+                    ),
+                )
+            } else {
+                (
+                    format!("--max-output {}", n.max(2)),
+                    format!(
+                        "keeps the first and last {} lines plus the code the failures point at",
+                        n.max(2) / 2
+                    ),
+                )
+            })
+        }
+        "grep" | "egrep" | "rg" | "select-string" | "sls" => {
+            let (mut pat, mut icase, mut ext) = (None, ps, filter == "egrep");
+            while let Some(a) = it.next() {
+                let k = key(a);
+                match k.as_str() {
+                    "-e" | "-pattern" => pat = Some(it.next()?),
+                    "-casesensitive" => icase = false,
+                    _ if ps && k.starts_with('-') => return None,
+                    "--ignore-case" => icase = true,
+                    "--extended-regexp" => ext = true,
+                    "--line-number" => {}
+                    f if f.starts_with('-') && !f.starts_with("--") && f.len() > 1 => {
+                        for c in f[1..].chars() {
+                            match c {
+                                'i' => icase = true,
+                                'E' => ext = true,
+                                'n' | 'H' | 'P' => {}
+                                _ => return None,
+                            }
+                        }
+                    }
+                    f if f.starts_with('-') => return None,
+                    _ => pat = pat.or(Some(a)),
+                }
+            }
+            let mut pat = unquote(pat?).to_owned();
+            if pat.contains('\'') {
+                return None;
+            }
+            if filter == "grep" && !ext {
+                pat = pat.replace("\\|", "|");
+            }
+            if icase {
+                pat.insert_str(0, "(?i)");
+            }
+            Some((
+                format!("--grep '{pat}'"),
+                "keeps the lines matching it plus the code they point at".to_owned(),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// PowerShell's way to grep: `Get-ChildItem … | Select-String PAT` searches the contents of the
@@ -869,7 +1080,7 @@ fn redirects_stdout(args: &[&str]) -> bool {
     })
 }
 
-fn rule(seg: &str, mut piped: bool, ps: bool) -> Option<Verdict> {
+fn rule(seg: &str, mut piped: bool, ps: bool, scope: Option<&Scope>) -> Option<Verdict> {
     let (mut head, mut words) = head(seg)?;
     if is_interpreter(head) {
         // Inline `-c` / `-e` scripts sit in the segment itself.
@@ -886,9 +1097,12 @@ fn rule(seg: &str, mut piped: bool, ps: bool) -> Option<Verdict> {
         *a == "--in-place" || (a.starts_with('-') && !a.starts_with("--") && a.contains('i'))
     });
     // JSON, TOML and YAML are data, read whole on purpose; they do not count as source here.
-    let source_file = args
-        .iter()
-        .any(|a| unquote(a).split(',').any(is_source_path));
+    // Neither do files outside the repository.
+    let source_file = args.iter().any(|a| {
+        unquote(a)
+            .split(',')
+            .any(|p| is_source_path(p) && inside(scope, p))
+    });
     // `find … -exec grep …` searches the files it finds.
     if head == "find"
         && let Some(i) = args.iter().position(|a| matches!(*a, "-exec" | "-execdir"))
@@ -1536,9 +1750,13 @@ mod tests {
         }
     }
 
-    use super::{READ_MAX, Verdict, check, check_ps, grep_tool, read_verdict};
+    use super::{
+        READ_MAX, Scope, Verdict, check, check_in, check_ps, check_ps_in, grep_tool, read_check,
+        read_verdict,
+    };
     use acus_syntax::Lang;
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn refuses_file_searches_reads_and_in_place_edits() {
@@ -1737,6 +1955,248 @@ mod tests {
             grep_tool(&json!({"pattern": "a\nb", "multiline": true}), cwd),
             None
         );
+    }
+
+    #[test]
+    fn names_the_ctx_flag_that_replaces_a_build_filter() {
+        for (cmd, want) in [
+            (
+                "cargo test -q | tail -n 40",
+                "`acus ctx 'cargo test -q' --tail 40`",
+            ),
+            (
+                "cargo test -q 2>&1 | tail -40",
+                "`acus ctx 'cargo test -q' --tail 40`",
+            ),
+            (
+                "cargo test -q | tail -n40",
+                "`acus ctx 'cargo test -q' --tail 40`",
+            ),
+            (
+                "cargo build | tail --lines=5",
+                "`acus ctx 'cargo build' --tail 5`",
+            ),
+            ("cargo build | tail", "`acus ctx 'cargo build' --tail 10`"),
+            (
+                "cargo test | grep -E 'FAILED|panicked'",
+                "`acus ctx 'cargo test' --grep 'FAILED|panicked'`",
+            ),
+            (
+                "cargo test | grep -n FAILED",
+                "`acus ctx 'cargo test' --grep 'FAILED'`",
+            ),
+            (
+                "cargo test | grep -i error",
+                "`acus ctx 'cargo test' --grep '(?i)error'`",
+            ),
+            (
+                "cargo test | grep -e FAILED",
+                "`acus ctx 'cargo test' --grep 'FAILED'`",
+            ),
+            (
+                "cargo test | grep 'a\\|b'",
+                "`acus ctx 'cargo test' --grep 'a|b'`",
+            ),
+            (
+                "cargo test | rg 'a|b'",
+                "`acus ctx 'cargo test' --grep 'a|b'`",
+            ),
+            (
+                "swift build 2>&1 | head -50",
+                "`acus ctx 'swift build' --max-output 50`",
+            ),
+            (
+                "npm test | head -n 20",
+                "`acus ctx 'npm test' --max-output 20`",
+            ),
+        ] {
+            let (rule, r) = deny(check(cmd));
+            assert_eq!(rule, "build-pipe", "{cmd}");
+            assert!(
+                r.contains(&format!("Use {want} instead of piping")),
+                "{cmd}: {r}"
+            );
+        }
+        // No equivalent flag: the reason still names both.
+        for cmd in [
+            "cargo test | grep -v ok",
+            "cargo test | grep -A3 FAILED",
+            "cargo test | tail -n +5",
+            "cargo test | tail -c 100",
+            "cargo test | grep \"it's\"",
+        ] {
+            let (rule, r) = deny(check(cmd));
+            assert_eq!(rule, "build-pipe", "{cmd}");
+            assert!(r.contains("`acus ctx 'cargo test'`"), "{cmd}: {r}");
+            assert!(
+                r.contains("`--tail N`") && r.contains("`--grep RE`"),
+                "{cmd}: {r}"
+            );
+            assert!(!r.contains("Use `acus ctx 'cargo test' --"), "{cmd}: {r}");
+        }
+        let (_, r) = deny(check("cd app && cargo test -q | tail -5 && echo done"));
+        assert!(r.contains("Use `acus ctx 'cargo test -q' --tail 5`"), "{r}");
+        assert!(r.contains("Replace that segment"), "{r}");
+    }
+
+    #[test]
+    fn refuses_acus_ctx_piped_into_tail_head_or_grep() {
+        for (cmd, want) in [
+            (
+                "acus ctx 'cargo test -q' | tail -n 30",
+                "`acus ctx 'cargo test -q' --tail 30`",
+            ),
+            (
+                "acus ctx 'cargo test -q' 2>&1 | tail -5",
+                "`acus ctx 'cargo test -q' --tail 5`",
+            ),
+            ("acus ctx | grep FAILED", "`acus ctx --grep 'FAILED'`"),
+            (
+                "acus ctx 'make' --raw | head -20",
+                "`acus ctx 'make' --raw --max-output 20`",
+            ),
+            (
+                "~/bin/acus ctx 'go test ./...' | tail",
+                "`~/bin/acus ctx 'go test ./...' --tail 10`",
+            ),
+        ] {
+            let (rule, r) = deny(check(cmd));
+            assert_eq!(rule, "ctx-pipe", "{cmd}");
+            assert!(
+                r.contains(&format!("Use {want} instead of piping acus ctx")),
+                "{cmd}: {r}"
+            );
+        }
+        let (rule, r) = deny(check("acus ctx 'cargo test' | grep -v ok"));
+        assert_eq!(rule, "ctx-pipe");
+        assert!(r.contains("--tail N") && r.contains("--grep RE"), "{r}");
+        // Other uses of ctx and other filters pass.
+        for cmd in [
+            "acus ctx 'cargo test' --tail 40",
+            "acus ctx 'cargo test' | wc -l",
+            "acus find foo | head",
+            "acus ctx 'cargo test | tail -5'",
+        ] {
+            assert_eq!(check(cmd), None, "{cmd}");
+        }
+        assert_eq!(
+            check("command acus ctx 'cargo test' | tail"),
+            Some(Verdict::Escape("ctx-pipe"))
+        );
+    }
+
+    #[test]
+    fn names_the_ctx_flag_for_powershell_filters() {
+        for (cmd, want) in [
+            (
+                "cargo build 2>&1 | Select-Object -Last 30",
+                "`acus ctx 'cargo build' --tail 30`",
+            ),
+            (
+                "cargo build | select -First 20",
+                "`acus ctx 'cargo build' --max-output 20`",
+            ),
+            (
+                "cargo test | Select-String Error",
+                "`acus ctx 'cargo test' --grep '(?i)Error'`",
+            ),
+            (
+                "cargo test | sls -Pattern 'FAILED|panicked'",
+                "`acus ctx 'cargo test' --grep '(?i)FAILED|panicked'`",
+            ),
+            ("acus ctx | Select-Object -Last 5", "`acus ctx --tail 5`"),
+        ] {
+            let (_, r) = deny(check_ps(cmd));
+            assert!(
+                r.contains(&format!("Use {want} instead of piping")),
+                "{cmd}: {r}"
+            );
+            assert!(r.contains("# acus-skip"), "{cmd}: {r}");
+        }
+    }
+
+    #[test]
+    fn leaves_reads_outside_the_repository_alone() {
+        let repo = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        std::fs::create_dir_all(repo.path().join("crates/app")).unwrap();
+        let cwd = repo.path().join("crates/app");
+        let scope = Scope::new(cwd.to_str()).unwrap();
+        let outside = other.path().join("agents/worker.md");
+        let outside = outside.to_str().unwrap();
+        let at = |cmd: &str| check_in(cmd, false, Some(&scope));
+        for cmd in [
+            format!("cat {outside}"),
+            format!("head -50 {outside}"),
+            format!("sed -n 1,20p {outside}"),
+            format!("tail -n 20 {outside} ~/.config/app/main.py"),
+            "cat ../../../elsewhere/a.rs".to_owned(),
+            "cat /tmp/notes/a.md".to_owned(),
+        ] {
+            assert_eq!(at(&cmd), None, "{cmd}");
+        }
+        // Inside the repository (also from a subdirectory, `..` and absolute) nothing changes.
+        let inside = repo.path().join("src/a.rs");
+        for cmd in [
+            "cat src/a.rs".to_owned(),
+            "cat ../../README.md".to_owned(),
+            format!("head -5 {}", inside.display()),
+            format!("cat {outside} src/a.rs"),
+        ] {
+            assert!(
+                matches!(at(&cmd), Some(Verdict::Deny("read-shell", _))),
+                "{cmd}"
+            );
+        }
+        // Without a session directory the old behaviour holds.
+        assert!(matches!(
+            check(&format!("cat {outside}")),
+            Some(Verdict::Deny(..))
+        ));
+        // Outside the repo, searches and build pipes are still refused.
+        assert!(matches!(
+            at("grep -rn foo /tmp/x"),
+            Some(Verdict::Deny("grep", _))
+        ));
+        assert!(matches!(
+            at("cargo test | tail"),
+            Some(Verdict::Deny("build-pipe", _))
+        ));
+        if std::env::var_os("HOME").is_some() {
+            assert!(!scope.inside("~/.claude/agents/worker.md"));
+            assert!(!scope.inside("$HOME/.config/x.md"));
+        }
+        // PowerShell: .NET reads follow the same scope.
+        let ps = |cmd: &str| check_ps_in(cmd, Some(&scope));
+        assert_eq!(ps(&format!("[IO.File]::ReadAllText('{outside}')")), None);
+        assert_eq!(ps(&format!("Get-Content {outside}")), None);
+        assert!(ps("Get-Content src\\a.rs").is_some());
+    }
+
+    #[test]
+    fn read_tool_only_refuses_large_files_inside_the_repository() {
+        let repo = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let big: String = (0..=READ_MAX)
+            .map(|i| format!("fn f{i}() {{}}\n"))
+            .collect();
+        let inside = repo.path().join("a.rs");
+        let outside = other.path().join("a.rs");
+        std::fs::write(&inside, &big).unwrap();
+        std::fs::write(&outside, &big).unwrap();
+        let cwd = repo.path().to_str().unwrap();
+        let scope = Scope::new(Some(cwd));
+        let read = |p: &Path| {
+            read_check(
+                &json!({"file_path": p.to_str().unwrap()}),
+                Some(cwd),
+                scope.as_ref(),
+            )
+        };
+        assert!(matches!(read(&inside), Some(Verdict::Deny("read-tool", _))));
+        assert_eq!(read(&outside), None);
     }
 
     #[test]
