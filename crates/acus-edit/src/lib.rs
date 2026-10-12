@@ -4,4 +4,4 @@ mod apply;
 mod parse;
 
 pub use apply::{Applied, Change, Region, apply};
-pub use parse::{Chunk, Op, parse};
+pub use parse::{Chunk, InsertAt, Op, parse};

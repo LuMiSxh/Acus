@@ -15,9 +15,16 @@ PATCH FORMAT (stdin or --file; all or nothing, nothing is written on an error):
                                 SEARCH/REPLACE blocks; context, `-` and SEARCH lines are WHOLE lines
   *** Add File: PATH            then `+` lines
   *** Delete File: PATH
+  *** Copy File: SRC            then *** To: DST (later hunks may update DST)
   *** Replace Symbol: PATH#Symbol   then the new definition as `+` lines
+  *** Insert Before: PATH#Symbol    then `+` lines (above its doc comments and attributes)
+  *** Insert After: PATH#Symbol     then `+` lines (below the symbol)
+                                    PATH:N instead of PATH#Symbol means before / after line N
   *** Delete Symbol: PATH#Symbol
   *** Move Symbol: PATH#Symbol      then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH
+
+  Context, `-` and SEARCH lines also match ignoring trailing whitespace and indentation if that
+  is unique; `+` lines are then re-indented to the file and a `note:` says so.
 
 PART OF A LINE: *** Replace All: PATH [PATH...]
   Replaces every occurrence of a text in the files, directories (walked, .gitignore respected)
@@ -95,6 +102,13 @@ pub fn run(a: Args, out: &Out, nested: bool, cfg: &Config) -> Result<Outcome> {
     if (a.fmt || cfg.patch.fmt) && !a.no_fmt && !a.check {
         lines.extend(format_written(&applied.changes, &mut applied.regions));
     }
+    let notes: Vec<String> = match applied.tolerant.as_slice() {
+        [] => vec![],
+        t => vec![format!(
+            "note: tolerant match (whitespace/indentation) in {}",
+            t.join(", ")
+        )],
+    };
     if out.format == Format::Json {
         let regions: Vec<_> = applied
             .regions
@@ -110,11 +124,14 @@ pub fn run(a: Args, out: &Out, nested: bool, cfg: &Config) -> Result<Outcome> {
             .collect();
         println!(
             "{}",
-            serde_json::json!({ "changes": lines, "regions": regions, "written": !a.check })
+            serde_json::json!({ "changes": lines, "notes": notes, "regions": regions, "written": !a.check })
         );
         return Ok(Outcome::Found);
     }
     for l in &lines {
+        println!("{l}");
+    }
+    for l in &notes {
         println!("{l}");
     }
     if !a.quiet {

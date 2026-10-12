@@ -237,6 +237,30 @@ fn patch_from_stdin() {
 }
 
 #[test]
+fn patch_reports_tolerant_matches_and_new_directives() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.py"), "def f():\n\treturn 1  \n").unwrap();
+    let p = "*** Update File: a.py\n def f():\n-    return 1\n+    return 2\n*** Copy File: a.py\n*** To: b.py\n*** Insert After: b.py:1\n+# top\n";
+    let (code, out, err) = acus_in(d.path(), &["patch", "-q"], p);
+    assert_eq!((code, err.as_str()), (0, ""), "{out}");
+    assert_eq!(
+        out,
+        "M a.py +1 -1\nA b.py +2\nM b.py +1 -0\nnote: tolerant match (whitespace/indentation) in a.py hunk 1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("b.py")).unwrap(),
+        "def f():\n# top\n\treturn 2\n"
+    );
+    let (code, _, err) = acus_in(
+        d.path(),
+        &["patch"],
+        "*** Update File: a.py\n-nothing like\n",
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("hunk 1: context not found"), "{err}");
+}
+
+#[test]
 fn commands_can_be_disabled_at_runtime() {
     let (code, _, err) = acus_env(&["find", "needle"], &[("ACUS_DISABLE", "usage, find")]);
     assert_eq!(code, 2);

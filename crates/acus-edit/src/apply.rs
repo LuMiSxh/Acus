@@ -1,4 +1,4 @@
-use crate::parse::{Block, Dest};
+use crate::parse::{Block, Dest, InsertAt};
 use crate::{Chunk, Op};
 use acus_syntax::{Lang, Resolve, attached_start, outline, resolve};
 use anyhow::{Context, Result, anyhow, bail};
@@ -67,6 +67,8 @@ pub struct Region {
 pub struct Applied {
     pub changes: Vec<Change>,
     pub regions: Vec<Region>,
+    /// `path hunk N` of every hunk that only matched ignoring whitespace or indentation.
+    pub tolerant: Vec<String>,
 }
 
 /// A file as the patch sees it; `lines: None` means deleted or not existing.
@@ -99,6 +101,7 @@ impl File {
 struct Files<'a> {
     root: &'a Path,
     map: BTreeMap<String, File>,
+    tolerant: Vec<String>,
 }
 
 impl Files<'_> {
@@ -161,6 +164,7 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     let mut files = Files {
         root,
         map: BTreeMap::new(),
+        tolerant: Vec::new(),
     };
     let mut changes = Vec::new();
     for op in ops {
@@ -182,9 +186,13 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
         }
     }
     if !check {
-        commit(root, files.map)?;
+        commit(root, std::mem::take(&mut files.map))?;
     }
-    Ok(Applied { changes, regions })
+    Ok(Applied {
+        changes,
+        regions,
+        tolerant: files.tolerant,
+    })
 }
 
 fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
@@ -218,11 +226,20 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
         } => {
             files.lines(path)?;
             let f = files.get(path)?;
+            let mut tol = Vec::new();
             for (i, c) in chunks.iter().enumerate() {
-                let at = locate_chunk(f.lines.as_ref().unwrap(), c)
+                let (at, pass) = locate_chunk(f.lines.as_ref().unwrap(), c, path)
                     .map_err(|e| anyhow!("{path}: hunk {}: {e}", i + 1))?;
-                f.splice(at, c.old.len(), &c.new);
+                if pass == 0 {
+                    f.splice(at, c.old.len(), &c.new);
+                } else {
+                    let found = &f.lines.as_ref().unwrap()[at..at + c.old.len()];
+                    let new = tolerant_new(found, c);
+                    f.splice(at, c.old.len(), &new);
+                    tol.push(format!("{path} hunk {}", i + 1));
+                }
             }
+            files.tolerant.extend(tol);
             let (added, removed) = chunks
                 .iter()
                 .fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
@@ -302,6 +319,67 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
             return move_symbol(files, path, symbol, to.as_ref().unwrap());
         }
         Op::ReplaceAll { paths, blocks } => return replace_all(files, paths, blocks),
+        Op::Insert {
+            path,
+            at,
+            after,
+            lines: body,
+        } => {
+            let at_line = match at {
+                InsertAt::Symbol(s) => {
+                    let (start, end) = symbol_lines(files, path, s)?;
+                    if *after {
+                        end
+                    } else {
+                        with_attached(files.lines(path)?, path, start, end).0
+                    }
+                }
+                InsertAt::Line(n) => {
+                    let len = files.lines(path)?.len();
+                    if *n > len {
+                        bail!(
+                            "{path}:{n}: the file has {len} lines at this point of the patch\nhint: acus show {path}"
+                        );
+                    }
+                    if *after { *n } else { n - 1 }
+                }
+            };
+            let f = files.get(path)?;
+            f.splice(at_line, 0, body);
+            f.dirty = true;
+            Change::Modified {
+                path: path.clone(),
+                added: body.len(),
+                removed: 0,
+            }
+        }
+        Op::Copy { from, to } => {
+            let to = to.as_ref().expect("parse checks the destination");
+            let src = files.get(from)?;
+            let Some(lines) = src.lines.clone() else {
+                bail!("{from}: file not found");
+            };
+            let (crlf, trailing_newline, perms) =
+                (src.crlf, src.trailing_newline, src.perms.clone());
+            let dst = files.get(to)?;
+            if dst.lines.is_some() {
+                bail!("{to}: already exists, refusing to copy {from} over it");
+            }
+            let n = lines.len();
+            *dst = File {
+                lines: Some(lines),
+                crlf,
+                trailing_newline,
+                perms,
+                existed: dst.existed,
+                dirty: true,
+                edits: Vec::new(),
+            };
+            Change::Added {
+                path: to.clone(),
+                lines: n,
+            }
+        }
     }])
 }
 
@@ -655,8 +733,9 @@ const PASSES: [Eq; 3] = [
     |a, b| a.trim() == b.trim(),
 ];
 
-/// Where `c.old` sits in `lines` (insertion point for pure additions).
-fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
+/// Where `c.old` sits in `lines` (insertion point for pure additions), and which pass of
+/// `PASSES` matched it (0 is exact).
+fn locate_chunk(lines: &[String], c: &Chunk, path: &str) -> Result<(usize, usize)> {
     // `from` stays on the anchor line itself: agents often repeat it as the first context line.
     let (mut from, mut after) = (0, 0);
     for a in &c.anchors {
@@ -670,14 +749,17 @@ fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
         after = from + 1;
     }
     if c.old.is_empty() {
-        Ok(if c.eof || c.anchors.is_empty() {
-            lines.len()
-        } else {
-            after
-        })
+        Ok((
+            if c.eof || c.anchors.is_empty() {
+                lines.len()
+            } else {
+                after
+            },
+            0,
+        ))
     } else {
         // Hunks often edit the doc comment or attributes just above their `@@ fn …` anchor.
-        locate(lines, &c.old, from, c.eof).or_else(|e| {
+        locate(lines, &c.old, from, c.eof, path).or_else(|e| {
             let back = from.saturating_sub(c.old.len());
             if back < from {
                 locate(
@@ -685,6 +767,7 @@ fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
                     &c.old,
                     back,
                     c.eof,
+                    path,
                 )
                 .map_err(|_| e)
             } else {
@@ -694,9 +777,15 @@ fn locate_chunk(lines: &[String], c: &Chunk) -> Result<usize> {
     }
 }
 
-fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<usize> {
+fn locate(
+    lines: &[String],
+    old: &[String],
+    from: usize,
+    eof: bool,
+    path: &str,
+) -> Result<(usize, usize)> {
     let last = lines.len().checked_sub(old.len());
-    for eq in PASSES {
+    for (pass, eq) in PASSES.into_iter().enumerate() {
         let Some(last) = last else { break };
         let hits: Vec<usize> = (from..=last)
             .filter(|&i| !eof || i == last)
@@ -704,7 +793,7 @@ fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<us
             .collect();
         match hits.as_slice() {
             [] => continue,
-            [i] => return Ok(*i),
+            [i] => return Ok((*i, pass)),
             _ => {
                 let at: Vec<_> = hits.iter().map(|i| (i + 1).to_string()).collect();
                 bail!(
@@ -717,9 +806,156 @@ fn locate(lines: &[String], old: &[String], from: usize, eof: bool) -> Result<us
     let j = old.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
     let first = old[j].trim();
     bail!(
-        "context not found, first expected line `{first}`\n{}",
-        near_miss(lines, old, j)
+        "context not found, first expected line `{first}`\n{}{}",
+        near_miss(lines, old, j),
+        nearest(lines, old, path)
     )
+}
+
+/// Rewrites the replacement of a hunk that matched only loosely: unchanged lines keep the
+/// file's text, added lines move by the indentation offset between the patch and the file.
+fn tolerant_new(found: &[String], c: &Chunk) -> Vec<String> {
+    let (old, new) = (&c.old, &c.new);
+    let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suf = old[pre..]
+        .iter()
+        .rev()
+        .zip(new[pre..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let shift = Shift::between(old, found);
+    let mut out = found[..pre].to_vec();
+    out.extend(new[pre..new.len() - suf].iter().map(|l| shift.apply(l)));
+    out.extend_from_slice(&found[old.len() - suf..]);
+    out
+}
+
+/// How the patch's indentation differs from the file's.
+enum Shift {
+    Same,
+    Add(String),
+    Strip(String),
+    SpacesToTabs(usize),
+    TabsToSpaces(usize),
+}
+
+impl Shift {
+    /// From the first non-blank line whose indentation differs.
+    fn between(old: &[String], found: &[String]) -> Shift {
+        let pair = old
+            .iter()
+            .zip(found)
+            .filter(|(o, _)| !o.trim().is_empty())
+            .map(|(o, f)| (indent(o), indent(f)))
+            .find(|(p, f)| p != f);
+        let Some((p, f)) = pair else {
+            return Shift::Same;
+        };
+        let only = |s: &str, c: char| !s.is_empty() && s.chars().all(|x| x == c);
+        if let Some(x) = f.strip_suffix(p) {
+            Shift::Add(x.into())
+        } else if let Some(x) = p.strip_suffix(f) {
+            Shift::Strip(x.into())
+        } else if only(p, ' ') && only(f, '\t') {
+            Shift::SpacesToTabs((p.len() / f.len()).max(1))
+        } else if only(p, '\t') && only(f, ' ') {
+            Shift::TabsToSpaces(f.len() / p.len())
+        } else {
+            Shift::Same
+        }
+    }
+
+    fn apply(&self, line: &str) -> String {
+        if line.trim().is_empty() {
+            return line.to_owned();
+        }
+        let ind = indent(line);
+        let rest = &line[ind.len()..];
+        match self {
+            Shift::Same => line.to_owned(),
+            Shift::Add(x) => format!("{x}{line}"),
+            Shift::Strip(x) => line.strip_prefix(x.as_str()).unwrap_or(line).to_owned(),
+            Shift::SpacesToTabs(unit) if ind.chars().all(|c| c == ' ') => {
+                format!(
+                    "{}{}{rest}",
+                    "\t".repeat(ind.len() / unit),
+                    " ".repeat(ind.len() % unit)
+                )
+            }
+            Shift::TabsToSpaces(unit) => {
+                format!("{}{rest}", ind.replace('\t', &" ".repeat(*unit)))
+            }
+            Shift::SpacesToTabs(_) => line.to_owned(),
+        }
+    }
+}
+
+/// The window of `lines` most like `old`, as `nearest: PATH:A-B` plus its first lines, so a
+/// failed hunk can be fixed in one step.
+fn nearest(lines: &[String], old: &[String], path: &str) -> String {
+    const SHOWN: usize = 8;
+    let n = old.len().min(lines.len());
+    if n == 0 {
+        return String::new();
+    }
+    let want: Vec<_> = old.iter().map(|l| bigrams(l)).collect();
+    let have: Vec<_> = lines.iter().map(|l| bigrams(l)).collect();
+    let mut best: Option<(f32, usize)> = None;
+    for i in 0..=lines.len() - n {
+        let score: f32 = (0..n)
+            .map(|k| similarity(&old[k], &lines[i + k], &want[k], &have[i + k]))
+            .sum();
+        if best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, i));
+        }
+    }
+    let Some((_, i)) = best.filter(|&(s, _)| s / n as f32 >= 0.4) else {
+        return String::new();
+    };
+    let span = if n == 1 {
+        format!("{}", i + 1)
+    } else {
+        format!("{}-{}", i + 1, i + n)
+    };
+    let mut out = format!("\nnearest: {path}:{span}");
+    for k in 0..n.min(SHOWN) {
+        out.push_str(&format!("\n{}\t{}", i + k + 1, lines[i + k]));
+    }
+    if n > SHOWN {
+        out.push_str(&format!("\n… {} more lines", n - SHOWN));
+    }
+    out
+}
+
+/// Sorted character pairs of the trimmed line.
+fn bigrams(line: &str) -> Vec<(char, char)> {
+    let cs: Vec<char> = line.trim().chars().collect();
+    let mut v: Vec<_> = cs.windows(2).map(|w| (w[0], w[1])).collect();
+    v.sort_unstable();
+    v
+}
+
+/// 0..=1: 1 for equal text ignoring surrounding whitespace, else the Dice coefficient of the bigrams.
+fn similarity(a: &str, b: &str, ba: &[(char, char)], bb: &[(char, char)]) -> f32 {
+    if a.trim() == b.trim() {
+        return 1.0;
+    }
+    if ba.is_empty() || bb.is_empty() {
+        return 0.0;
+    }
+    let (mut i, mut j, mut common) = (0, 0, 0);
+    while i < ba.len() && j < bb.len() {
+        match ba[i].cmp(&bb[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                common += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    2.0 * common as f32 / (ba.len() + bb.len()) as f32
 }
 
 /// Why the closest candidate failed, so the agent can fix the hunk without re-reading the file.
