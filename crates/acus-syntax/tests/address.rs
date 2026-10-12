@@ -11,6 +11,10 @@ fn parses_all_forms() {
         Target::Lines(10, 20)
     );
     assert_eq!(Address::parse("src/a.rs:7").target, Target::Lines(7, 7));
+    assert_eq!(
+        Address::parse("src/a.rs:10,20").target,
+        Target::Lines(10, 20)
+    );
     assert_eq!(Address::parse("src/a.rs").target, Target::Whole);
     let win = Address::parse(r"C:\x\a.rs:3");
     assert_eq!(

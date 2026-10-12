@@ -45,6 +45,8 @@ fn opts(root: &Path, pat: &str, syntax: bool) -> FindOpts {
         fixed: false,
         syntax,
         word: false,
+        invert: false,
+        max_per_file: None,
     }
 }
 

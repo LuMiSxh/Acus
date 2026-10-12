@@ -162,18 +162,8 @@ pub fn find_flag_hint(e: &clap::Error, args: &[String]) -> Option<String> {
     };
     let flag = flag.split('=').next().unwrap_or(flag);
     let near = match flag {
-        "-c" | "--count" => "`acus find -l PAT` lists each file with its number of hits",
-        "-v" | "--invert-match" => {
-            "`acus find` cannot invert a match; write the regex for the lines you want, or filter other output with `grep -v`"
-        }
-        "-o" | "--only-matching" => {
-            "`acus find` prints whole matching lines; `acus show path:A-B` prints a range"
-        }
         "-x" | "--line-regexp" => "anchor the pattern instead: 'PAT' as '^PAT$'",
-        "-m" | "--max-count" => "`--max-hits N` caps the hits",
         "-s" | "-S" | "--smart-case" | "--no-messages" => "`-i` ignores case",
-        "--include" => "`-g '*.ext'` includes files by glob",
-        "--exclude" | "--exclude-dir" => "`-g '!GLOB'` excludes files by glob",
         "-L" | "--files-without-match" => "`acus find -l PAT` lists the files that match",
         "--no-heading" | "--color" | "--no-line-number" | "--heading" | "--line-number" => {
             "output is always grouped by file with line numbers; drop the flag"
