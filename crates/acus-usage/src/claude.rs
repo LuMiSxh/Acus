@@ -63,6 +63,11 @@ struct BashInput<'a> {
     command: Option<&'a str>,
 }
 
+#[derive(Deserialize)]
+struct AgentInput<'a> {
+    subagent_type: Option<&'a str>,
+}
+
 pub(crate) fn parse(text: &str) -> FileStats {
     let mut st = FileStats::default();
     let mut tool_of: HashMap<String, String> = HashMap::new();
@@ -109,6 +114,13 @@ pub(crate) fn parse(text: &str) -> FileStats {
                         _ => false,
                     };
                     if let Some(id) = b.id {
+                        if matches!(name.as_str(), "Agent" | "Task")
+                            && let Some(t) = serde_json::from_str::<AgentInput>(input)
+                                .ok()
+                                .and_then(|i| i.subagent_type)
+                        {
+                            st.spawns.push((id.to_owned(), t.to_owned()));
+                        }
                         tool_of.insert(id.to_owned(), name.clone());
                     }
                     st.categories

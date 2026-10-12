@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `acus usage --agents`: one row per subagent role (from `agentType` in the subagent's meta file, else the parent's Agent call; top-level sessions are `main`) with spawns, models, median requests and first-request context per spawn, weighted cost, share and median cost per spawn. The default JSON report gains an `agents` key.
+
 ## [0.9.0]
 
 ### Added
