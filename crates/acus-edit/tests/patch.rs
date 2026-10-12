@@ -121,6 +121,15 @@ fn unknown_directives_list_the_accepted_forms() {
     );
     assert!(m.contains("`<<<<<<< SEARCH` or `<<<<<<< REGEX`"), "{m}");
     assert!(m.contains("*** Update File: PATH"), "{m}");
+    for form in [
+        "*** Copy File: PATH (then *** To: PATH)",
+        "*** Insert Before: PATH#Symbol or PATH:LINE",
+        "*** Insert After: PATH#Symbol or PATH:LINE",
+    ] {
+        assert!(m.contains(form), "{m}");
+    }
+    assert!(e("*** insert after: a.rs#f\n").contains("did you mean `*** Insert After:"));
+    assert!(e("*** copy file: a.rs\n").contains("did you mean `*** Copy File: PATH`"));
     assert!(e("*** Replace All:src\n").contains("did you mean"));
     assert!(e("*** Replace All:\n").contains("did you mean"));
     assert!(e("*** update file: a.rs\n").contains("did you mean `*** Update File: PATH`"));
@@ -174,12 +183,183 @@ fn missing_context_names_the_line() {
 #[test]
 fn whitespace_tolerant_match() {
     let d = dir(&[("a.py", "def f():\n    return 1   \n")]);
-    run(
+    let a = apply(
+        &parse("*** Update File: a.py\n def f():\n-  return 1\n+  return 2\n").unwrap(),
         d.path(),
-        "*** Update File: a.py\n def f():\n-  return 1\n+    return 2\n",
+        false,
     )
     .unwrap();
     assert_eq!(read(d.path(), "a.py"), "def f():\n    return 2\n");
+    assert_eq!(a.tolerant, ["a.py hunk 1"]);
+}
+
+#[test]
+fn tolerant_match_reindents_added_lines_and_keeps_file_context() {
+    let d = dir(&[(
+        "a.rs",
+        "impl A {\n\tfn f() {\n\t\tone();\n\t\ttwo();\n\t}\n}\n",
+    )]);
+    // Spaces in the patch, tabs in the file; context keeps the file's own lines.
+    run(
+        d.path(),
+        "*** Update File: a.rs\n     fn f() {\n         one();\n+        mid();\n+            deep();\n         two();\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "impl A {\n\tfn f() {\n\t\tone();\n\t\tmid();\n\t\t\tdeep();\n\t\ttwo();\n\t}\n}\n"
+    );
+    // Same kind of indent, patch at column 0 while the file is nested: add the offset.
+    let d = dir(&[("b.py", "class A:\n    def f(self):\n        return 1\n")]);
+    run(
+        d.path(),
+        "*** Update File: b.py\n-def f(self):\n-    return 1\n+def f(self):\n+    return 2\n+\n+def g(self):\n+    pass\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "b.py"),
+        "class A:\n    def f(self):\n        return 2\n\n    def g(self):\n        pass\n"
+    );
+}
+
+#[test]
+fn tolerant_match_must_be_unique_and_exact_matches_are_not_reported() {
+    let d = dir(&[("a.txt", "  x\n    x\ny\n")]);
+    let e = run(d.path(), "*** Update File: a.txt\n-x\n+z\n")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("context matches at lines 1, 2"), "{e}");
+    let a = apply(
+        &parse("*** Update File: a.txt\n-y\n+z\n").unwrap(),
+        d.path(),
+        true,
+    )
+    .unwrap();
+    assert!(a.tolerant.is_empty());
+    // SEARCH blocks are tolerant as well.
+    let d = dir(&[("a.rs", "fn f() {\n    a();   \n}\n")]);
+    let a = apply(
+        &parse("*** Update File: a.rs\n<<<<<<< SEARCH\n  a();\n=======\n  b();\n>>>>>>> REPLACE\n")
+            .unwrap(),
+        d.path(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "fn f() {\n    b();\n}\n");
+    assert_eq!(a.tolerant.len(), 1);
+}
+
+#[test]
+fn context_not_found_names_the_nearest_region() {
+    let lines: Vec<String> = (1..=30).map(|i| format!("filler line {i}")).collect();
+    let mut text = lines.join("\n");
+    text.push_str("\nfn target(a: u8) {\n    let value = compute(a);\n    finish(value);\n}\n");
+    let d = dir(&[("src/a.rs", &text)]);
+    let e = run(
+        d.path(),
+        "*** Update File: src/a.rs\n fn target(a: u32) {\n-    let value = compute(a, 1);\n     finish(value);\n+    done();\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("nearest: src/a.rs:31-33\n31\tfn target(a: u8) {\n32\t    let value = compute(a);\n33\t    finish(value);"), "{e}");
+    // Nothing alike: no nearest line.
+    let e = run(d.path(), "*** Update File: src/a.rs\n-qqqq zzzz\n+x\n")
+        .unwrap_err()
+        .to_string();
+    assert!(!e.contains("nearest:"), "{e}");
+    // Long regions are capped.
+    let text: String = (1..=12).map(|i| format!("row number {i}\n")).collect();
+    let d = dir(&[("b.txt", &text)]);
+    let patch: String = (1..=12).map(|i| format!("-row numbr {i}\n")).collect();
+    let e = run(d.path(), &format!("*** Update File: b.txt\n{patch}"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("nearest: b.txt:1-12") && e.contains("… 4 more lines"),
+        "{e}"
+    );
+    assert!(!e.contains("\n9\t"), "{e}");
+}
+
+#[test]
+fn insert_before_and_after_symbols_and_lines() {
+    let d = dir(&[(
+        "a.rs",
+        "fn one() {}\n\n/// Two.\n#[inline]\nfn two() {}\n\nfn three() {}\n",
+    )]);
+    let c = run(
+        d.path(),
+        "*** Insert Before: a.rs#two\n+/// New.\n+fn new() {}\n+\n*** Insert After: a.rs#two\n+\n+fn after() {}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "fn one() {}\n\n/// New.\nfn new() {}\n\n/// Two.\n#[inline]\nfn two() {}\n\nfn after() {}\n\nfn three() {}\n"
+    );
+    let s: Vec<_> = c.iter().map(ToString::to_string).collect();
+    assert_eq!(s, ["M a.rs +3 -0", "M a.rs +2 -0"]);
+    run(
+        d.path(),
+        "*** Insert Before: a.rs:1\n+// top\n*** Insert After: a.rs:13\n+// bottom\n",
+    )
+    .unwrap();
+    let got = read(d.path(), "a.rs");
+    assert!(got.starts_with("// top\nfn one() {}\n"), "{got}");
+    assert!(got.ends_with("fn three() {}\n// bottom\n"), "{got}");
+    let e = run(d.path(), "*** Insert After: a.rs:99\n+x\n")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("a.rs:99"), "{e}");
+    assert!(parse("*** Insert After: a.rs:0\n+x\n").is_err());
+    assert!(parse("*** Insert After: a.rs\n+x\n").is_err());
+    assert!(
+        parse("*** Insert Before: a.rs#two\n")
+            .unwrap_err()
+            .to_string()
+            .contains("needs `+` lines")
+    );
+}
+
+#[test]
+fn insert_mixes_with_other_ops_all_or_nothing() {
+    let d = dir(&[("a.rs", "fn one() {}\n"), ("b.txt", "keep\n")]);
+    let e = run(
+        d.path(),
+        "*** Update File: b.txt\n-keep\n+changed\n*** Insert After: a.rs#missing\n+x\n",
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("no symbol `missing`"), "{e:#}");
+    assert_eq!(read(d.path(), "b.txt"), "keep\n");
+}
+
+#[test]
+fn copy_file_then_update_the_copy() {
+    let d = dir(&[("a.rs", "fn one() {}\r\n"), ("b.txt", "x\n")]);
+    let c = run(
+        d.path(),
+        "*** Copy File: a.rs\n*** To: sub/c.rs\n*** Update File: sub/c.rs\n-fn one() {}\n+fn two() {}\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "fn one() {}\r\n");
+    assert_eq!(read(d.path(), "sub/c.rs"), "fn two() {}\r\n");
+    let s: Vec<_> = c.iter().map(ToString::to_string).collect();
+    assert_eq!(s, ["A sub/c.rs +1", "M sub/c.rs +1 -1"]);
+    let e = |p: &str| run(d.path(), p).unwrap_err().to_string();
+    assert!(e("*** Copy File: a.rs\n*** To: b.txt\n").contains("already exists"));
+    assert!(e("*** Copy File: nope.rs\n*** To: n.rs\n").contains("nope.rs"));
+    assert!(
+        parse("*** Copy File: a.rs\n")
+            .unwrap_err()
+            .to_string()
+            .contains("needs a destination")
+    );
+    assert!(
+        parse("*** To: x\n")
+            .unwrap_err()
+            .to_string()
+            .contains("`*** Copy File:`")
+    );
+    assert!(!d.path().join("n.rs").exists());
 }
 
 #[test]

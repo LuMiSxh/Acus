@@ -33,6 +33,26 @@ pub enum Op {
         symbol: String,
         to: Option<Dest>,
     },
+    /// `+` lines next to a symbol or line.
+    Insert {
+        path: String,
+        at: InsertAt,
+        after: bool,
+        lines: Vec<String>,
+    },
+    /// `*** Copy File: from` then `*** To: to`.
+    Copy {
+        from: String,
+        to: Option<String>,
+    },
+}
+
+/// The anchor of `*** Insert Before/After`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertAt {
+    Symbol(String),
+    /// 1-based line.
+    Line(usize),
 }
 
 /// A `<<<<<<< SEARCH` (or `REGEX`) / `=======` / `>>>>>>> REPLACE` block of `*** Replace All`.
@@ -81,9 +101,25 @@ fn sym_addr(rest: &str, n: usize, directive: &str) -> Result<(String, String)> {
     }
 }
 
+/// `PATH#Symbol` or `PATH:N`.
+fn insert_addr(rest: &str, n: usize, directive: &str) -> Result<(String, InsertAt)> {
+    let rest = rest.trim();
+    if rest.contains('#') {
+        let (p, s) = sym_addr(rest, n, directive)?;
+        return Ok((p, InsertAt::Symbol(s)));
+    }
+    match rest
+        .rsplit_once(':')
+        .and_then(|(p, l)| Some((p, l.parse::<usize>().ok().filter(|&l| l > 0)?)))
+    {
+        Some((p, l)) if !p.is_empty() => Ok((p.into(), InsertAt::Line(l))),
+        _ => bail!("patch line {n}: expected `*** {directive}: path#Symbol` or `path:LINE`"),
+    }
+}
+
 pub fn parse(text: &str) -> Result<Vec<Op>> {
     /// The accepted directives, as the unknown-directive error lists them.
-    const DIRECTIVES: &str = "*** Add File: PATH | *** Update File: PATH | *** Delete File: PATH | *** Move to: PATH (after Update File) | *** Replace Symbol: PATH#Symbol | *** Delete Symbol: PATH#Symbol | *** Move Symbol: PATH#Symbol (then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH) | *** Replace All: PATH [PATH...] (files, directories or globs, then `<<<<<<< SEARCH` or `<<<<<<< REGEX`, `=======`, `>>>>>>> REPLACE`; see `acus patch --help`)";
+    const DIRECTIVES: &str = "*** Add File: PATH | *** Update File: PATH | *** Delete File: PATH | *** Move to: PATH (after Update File) | *** Copy File: PATH (then *** To: PATH) | *** Replace Symbol: PATH#Symbol | *** Insert Before: PATH#Symbol or PATH:LINE (then `+` lines) | *** Insert After: PATH#Symbol or PATH:LINE (then `+` lines) | *** Delete Symbol: PATH#Symbol | *** Move Symbol: PATH#Symbol (then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH) | *** Replace All: PATH [PATH...] (files, directories or globs, then `<<<<<<< SEARCH` or `<<<<<<< REGEX`, `=======`, `>>>>>>> REPLACE`; see `acus patch --help`)";
 
     /// `did you mean …` for a directive with the right name but the wrong case or spacing, such as
     /// `*** Replace all:` or `*** Replace All:src`; empty otherwise.
@@ -103,6 +139,9 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             "updatefile" => "*** Update File: PATH",
             "deletefile" => "*** Delete File: PATH",
             "moveto" => "*** Move to: PATH",
+            "copyfile" => "*** Copy File: PATH",
+            "insertbefore" => "*** Insert Before: PATH#Symbol",
+            "insertafter" => "*** Insert After: PATH#Symbol",
             "replacesymbol" => "*** Replace Symbol: PATH#Symbol",
             "deletesymbol" => "*** Delete Symbol: PATH#Symbol",
             "movesymbol" => "*** Move Symbol: PATH#Symbol",
@@ -166,6 +205,28 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
                 paths: p.split_whitespace().map(Into::into).collect(),
                 blocks: vec![],
             });
+        } else if let Some(p) = line.strip_prefix("*** Copy File: ") {
+            ops.push(Op::Copy {
+                from: p.trim().into(),
+                to: None,
+            });
+        } else if let Some((after, rest)) = line
+            .strip_prefix("*** Insert Before: ")
+            .map(|r| (false, r))
+            .or_else(|| line.strip_prefix("*** Insert After: ").map(|r| (true, r)))
+        {
+            let dir = if after {
+                "Insert After"
+            } else {
+                "Insert Before"
+            };
+            let (path, at) = insert_addr(rest, n, dir)?;
+            ops.push(Op::Insert {
+                path,
+                at,
+                after,
+                lines: vec![],
+            });
         } else if let Some(rest) = line.strip_prefix("*** Delete Symbol: ") {
             let (path, symbol) = sym_addr(rest, n, "Delete Symbol")?;
             ops.push(Op::DeleteSymbol { path, symbol });
@@ -180,8 +241,17 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             .iter()
             .find_map(|k| line.strip_prefix(&format!("*** {k}: ")).map(|r| (*k, r)))
         {
+            if let (Some(Op::Copy { to, .. }), "To") = (ops.last_mut(), kind) {
+                *to = Some(rest.trim().into());
+                continue;
+            }
             let Some(Op::MoveSymbol { to, .. }) = ops.last_mut() else {
-                bail!("patch line {n}: `*** {kind}:` must follow `*** Move Symbol:`");
+                let or = if kind == "To" {
+                    " or `*** Copy File:`"
+                } else {
+                    ""
+                };
+                bail!("patch line {n}: `*** {kind}:` must follow `*** Move Symbol:`{or}");
             };
             *to = Some(match kind {
                 "To" => Dest::End {
@@ -234,6 +304,12 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
                 to: None,
             } => bail!(
                 "{path}#{symbol}: `*** Move Symbol` needs a destination\nhint: follow it with `*** Before: path#Sym`, `*** After: path#Sym` or `*** To: path`"
+            ),
+            Op::Copy { from, to: None } => bail!(
+                "{from}: `*** Copy File` needs a destination\nhint: follow it with `*** To: path`"
+            ),
+            Op::Insert { path, lines, .. } if lines.is_empty() => bail!(
+                "{path}: `*** Insert` needs `+` lines\nhint: add the lines to insert, each starting with `+`"
             ),
             _ => {}
         }
@@ -309,12 +385,12 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
                 }
             }
         }
-        Some(Op::Add { lines, .. } | Op::ReplaceSymbol { lines, .. }) => {
-            match line.strip_prefix('+') {
-                Some(l) => lines.push(l.into()),
-                None => bail!("patch line {n}: every new line must start with `+`"),
-            }
-        }
+        Some(
+            Op::Add { lines, .. } | Op::ReplaceSymbol { lines, .. } | Op::Insert { lines, .. },
+        ) => match line.strip_prefix('+') {
+            Some(l) => lines.push(l.into()),
+            None => bail!("patch line {n}: every new line must start with `+`"),
+        },
         Some(Op::Update { chunks, .. }) => {
             let c = chunks.last_mut().unwrap();
             if let Some(anchor) = line.strip_prefix("@@") {
@@ -354,6 +430,9 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
         }
         Some(Op::DeleteSymbol { path, symbol } | Op::MoveSymbol { path, symbol, .. }) => {
             bail!("patch line {n}: unexpected content after `{path}#{symbol}`")
+        }
+        Some(Op::Copy { from, .. }) => {
+            bail!("patch line {n}: unexpected content after `*** Copy File: {from}`")
         }
         None => bail!(
             "patch line {n}: content before any `***` directive\nhint: start with `*** Update File: PATH`"

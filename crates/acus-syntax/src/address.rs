@@ -26,7 +26,8 @@ impl Address {
             };
         }
         if let Some((path, range)) = s.rsplit_once(':') {
-            let (a, b) = range.split_once('-').unwrap_or((range, range));
+            // `A,B` is the sed-style spelling of `A-B`.
+            let (a, b) = range.split_once(['-', ',']).unwrap_or((range, range));
             if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
                 return Address {
                     path: path.into(),

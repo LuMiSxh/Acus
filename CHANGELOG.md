@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.0]
+
+### Added
+
+- `acus patch` accepts `*** Insert Before: PATH#Symbol` and `*** Insert After: PATH#Symbol` (also `PATH:N`), followed by `+` lines. Before inserts above the symbol's doc comments and attributes.
+- `acus patch` accepts `*** Copy File: SRC` with `*** To: DST` to copy a file. The copy fails if DST exists, and later hunks in the same patch may update DST.
+- A `context not found` error from `acus patch` ends with `nearest: path:A-B` and up to 8 lines of the most similar region, so the retry needs no search.
+- `acus find` accepts `-c`/`--count` (per-file counts plus a total), `-o`/`--only-matching`, `-v`/`--invert-match`, `-m N`/`--max-count N` (per file; `--max-hits` stays the global cap), `-E` (a no-op), and `-P` (look-around and backreferences get a hint). `--include`, `--exclude` and `--exclude-dir` are mapped onto `-g`. All of them work inside `acus run` too. A grep-style `\|` is read as alternation, with a note on stderr, unless `-F`, `-E` or `-P` is given or the pattern already uses `|`.
+- `acus show path:A,B` is the same as `path:A-B`.
+- `acus ctx --tail N` keeps the last N lines plus every failure block, and `--grep RE` keeps the matching lines. The code they reference is computed from what is shown, and the full log is saved when lines were dropped.
+- `acus guard` rule `ctx-pipe` refuses `acus ctx '…' | tail/head/grep` with the matching flag.
+
+### Changed
+
+- `acus patch` re-indents `+` lines when a hunk matched only after ignoring whitespace and indentation, and prints `note: tolerant match …`.
+- `acus guard` build-pipe refusals give the exact rewrite: `cargo test -q | tail -n 40` becomes `acus ctx 'cargo test -q' --tail 40`, `head -n N` becomes `--max-output N`, and `grep PAT` or `Select-String` becomes `--grep`.
+- `acus guard` no longer refuses `cat`, `head`, `tail`, `sed -n` or `Get-Content` reads, or Read tool calls, of files outside the session's repository.
+- A trailing `/` in an exclude glob (`-g '!node_modules/'`) now works.
+
 ## [0.8.0]
 
 ### Added

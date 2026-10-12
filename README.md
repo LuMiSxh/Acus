@@ -116,11 +116,11 @@ Search and read code with `acus` instead of grep/rg/find/cat/sed -n (`acus find 
 
 | Command | What it does |
 | --- | --- |
-| `acus find PATTERN [PATH...]` | Regex search, hits grouped by enclosing symbol; `--block` adds the bodies; `-w`, `-l`, `-t`, `-u` work as in rg |
+| `acus find PATTERN [PATH...]` | Regex search, hits grouped by enclosing symbol; `--block` adds the bodies; `-w`, `-l`, `-t`, `-u` work as in rg; `-c`, `-o`, `-v`, `-m`, `--include` and `--exclude` work as in grep |
 | `acus outline PATH...` | Symbols of a file or directory with kinds and line ranges |
 | `acus show ADDR...` | Symbols, line ranges or whole files, numbered |
 | `acus patch` | Applies a patch from stdin, all or nothing, and prints the written lines |
-| `acus ctx ['COMMAND']` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. Without a command it runs the project's tests (detected from Cargo.toml, Package.swift, go.mod, package.json or pytest files). When output is cut, the full log is saved to a temp file and its path printed |
+| `acus ctx ['COMMAND']` | Runs a build or test, drops progress noise, colour codes, passing tests and library stack frames, and shows the code behind every `path:line` in its output, each function once. Without a command it runs the project's tests (detected from Cargo.toml, Package.swift, go.mod, package.json or pytest files). `--tail N` keeps the last N lines plus every failure block, and `--grep RE` keeps the matching lines. When output is cut, the full log is saved to a temp file and its path printed |
 | `acus diff [REV] [PATH...]` | Uncommitted changes per function or type, with untracked files; `-p` adds the lines, `--staged` and `A..B` work as in git |
 | `acus log [REV] [PATH...]` | One line per commit with date, author and changed lines; `-n` sets the count (default 15); `REV` can be `A..B` |
 | `acus run` | Several of the above in one process, one command line per stdin line (or a JSON list of argument lists) |
@@ -184,9 +184,13 @@ fn ${1}_new(
 *** Delete Symbol: src/lib.rs#unused
 *** Move Symbol: src/lib.rs#helper
 *** After: src/util.rs#main
+*** Insert Before: src/lib.rs#parse
++// Parses one expression.
+*** Copy File: src/lib.rs
+*** To: src/lib_copy.rs
 ```
 
-SEARCH/REPLACE blocks are the format Aider made popular and can stand in for `-`/`+` lines inside any `Update File`. `*** Replace All: PATH [PATH...]` changes every occurrence, also part of a line, in the space-separated files, directories and globs after it (a glob such as `*.py` matches below the current directory), and fails if a block matches nowhere. A block is `<<<<<<< SEARCH` (literal, whitespace-exact, may span lines) or `<<<<<<< REGEX` (a Rust regex run per file with `(?m)`; `${1}` in the replacement). `-` and SEARCH lines inside `Update File` match whole lines, and a failed hunk that holds only part of a line says to use `Replace All`; `acus patch --help` shows the syntax. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
+SEARCH/REPLACE blocks are the format Aider made popular and can stand in for `-`/`+` lines inside any `Update File`. `*** Replace All: PATH [PATH...]` changes every occurrence, also part of a line, in the space-separated files, directories and globs after it (a glob such as `*.py` matches below the current directory), and fails if a block matches nowhere. A block is `<<<<<<< SEARCH` (literal, whitespace-exact, may span lines) or `<<<<<<< REGEX` (a Rust regex run per file with `(?m)`; `${1}` in the replacement). `-` and SEARCH lines inside `Update File` match whole lines, and a failed hunk that holds only part of a line says to use `Replace All`; `acus patch --help` shows the syntax. `*** Insert Before:` and `*** Insert After:` take `path#Symbol` (or `path:N`) and put the `+` lines above the symbol's doc comments and attributes, or below the symbol. `*** Copy File: SRC` with `*** To: DST` copies a file and fails if DST exists. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
 
 Nothing is written unless every hunk applies. Files are replaced atomically. `--check` only validates. `--fmt` (or `[patch] fmt = true`) runs each written file through its formatter if one is installed (rustfmt with the crate's edition, ruff or black, the project's prettier, swift-format, gofmt) and prints the formatted lines, so line numbers and context stay true for the next patch.
 

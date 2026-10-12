@@ -19,7 +19,7 @@ One call answers what usually takes search → read → read. Output is line-num
 | A symbol, line range or file | `acus show src/a.rs#Parser::parse src/b.rs:40-80 README.md` |
 | Several independent lookups | `acus run` with one command per line on stdin |
 | Edit, rename across files, move or delete a symbol | `acus patch` with the patch on stdin |
-| Run tests/build and see the failing code | `acus ctx 'cargo test -q'`, or `acus ctx` alone for the project's tests (noise is dropped; `--drop 'RE'` for more) |
+| Run tests/build and see the failing code | `acus ctx 'cargo test -q'` (`--tail N` / `--grep RE` trim long output), or `acus ctx` alone for the project's tests (noise is dropped; `--drop 'RE'` for more) |
 | What changed (before a commit, review or handoff; replaces `git status` and `git diff`) | `acus diff [REV] [-p]` |
 | Recent commits (replaces `git log`) | `acus log [REV] [PATH…] [-n N]`; one commit's changes: `acus diff REV^..REV` |
 
@@ -70,6 +70,10 @@ fn ${1}_new(
 *** Delete Symbol: src/a.rs#unused
 *** Move Symbol: src/a.rs#helper
 *** After: src/b.rs#main
+*** Insert After: src/a.rs#main
++fn helper() {}
+*** Copy File: src/a.rs
+*** To: src/a_copy.rs
 ```
 
 - `-`, context and SEARCH lines inside `Update File` match whole lines (an `@@` line before it narrows the place). For part of a line, use `Replace All`.
@@ -94,7 +98,7 @@ EOF
 ## Common mistakes
 
 - Unquoted globs are expanded by the shell: write `-g '*.ts'`, and `-g '!dist'` to exclude.
-- Patterns are Rust regex, so `foo(` fails; use `-F` for literal text.
+- Patterns are Rust regex, so `foo(` fails; use `-F` for literal text. Grep flags such as `-c`, `-o` and `-v` work.
 - Symbols exist for Rust, Swift, TS/JS, Svelte, Python, Markdown and TOML/JSON/YAML keys. Other files: `find` and `show path:A-B`.
 
 Flags: `acus help <command>`.

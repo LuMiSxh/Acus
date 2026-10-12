@@ -78,11 +78,8 @@ fn find_accepts_recursive_grep_habits_and_explains_the_rest() {
         assert_eq!(code, 0, "{flags:?}: {err}");
     }
     for (flag, near) in [
-        ("-c", "acus find -l PAT"),
-        ("-v", "cannot invert"),
-        ("--count", "acus find -l PAT"),
-        ("-o", "whole matching lines"),
-        ("--include=*.rs", "-g '*.ext'"),
+        ("-x", "'^PAT$'"),
+        ("-L", "acus find -l PAT"),
         ("--bogus", "that flag does not exist"),
     ] {
         let (code, out, err) = acus(&["find", "needle", flag]);
@@ -100,9 +97,117 @@ fn find_accepts_recursive_grep_habits_and_explains_the_rest() {
     let (_, out, _) = acus_in(
         std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj")),
         &["run"],
-        "[[\"find\", \"needle\", \"-v\"]]",
+        "[[\"find\", \"needle\", \"-x\"]]",
     );
-    assert!(out.contains("hint: `acus find` cannot invert"), "{out}");
+    assert!(out.contains("hint: anchor the pattern"), "{out}");
+}
+
+#[test]
+fn find_count_lists_files_and_total() {
+    let (code, out, _) = acus(&["find", "needle", "-c"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "README.md 1\nsrc/lib.rs 3\nweb/App.svelte 1\ntotal 5 in 3 files\n"
+    );
+    assert_eq!(
+        acus(&["find", "needle", "--count", "-m", "1", "-g", "*.rs"]).1,
+        "src/lib.rs 1\ntotal 1 in 1 files\n"
+    );
+    let (_, json, _) = acus(&["find", "needle", "-c", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["total"], 5);
+    assert_eq!(v["files"][1]["path"], "src/lib.rs");
+    assert_eq!(v["files"][1]["count"], 3);
+    assert_eq!(acus(&["find", "zzz-none", "-c"]).0, 1);
+}
+
+#[test]
+fn find_only_matching_prints_the_matched_text() {
+    let (code, out, _) = acus(&["find", "-o", r"need\w+", "-g", "*.rs"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("11\tneedle\n12\tneedle\n"), "{out}");
+    assert!(!out.contains("let needle"), "{out}");
+    let (_, json, _) = acus(&["find", "-o", "need", "--json", "-g", "*.rs"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["files"][0]["hits"][0]["matches"][0], "need");
+    assert!(v["files"][0]["hits"][0].get("text").is_none());
+}
+
+#[test]
+fn find_invert_and_max_count_work_per_file() {
+    let (code, out, _) = acus(&["find", "-v", "needle", "README.md"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Demo") && !out.contains("Run the needle"),
+        "{out}"
+    );
+    let (_, out, _) = acus(&["find", "-m", "1", "needle", "src/lib.rs"]);
+    assert_eq!(out.matches("needle").count(), 1, "{out}");
+    assert_eq!(acus(&["find", "needle", "-m", "0"]).0, 2);
+}
+
+#[test]
+fn find_grep_glob_flags_map_to_globs() {
+    let rs = acus(&["find", "needle", "-l", "-g", "*.rs"]).1;
+    assert_eq!(acus(&["find", "needle", "-l", "--include=*.rs"]).1, rs);
+    assert_eq!(acus(&["find", "needle", "-l", "--include", "*.rs"]).1, rs);
+    let (_, out, _) = acus(&[
+        "find",
+        "needle",
+        "-l",
+        "--exclude",
+        "*.rs",
+        "--exclude-dir",
+        "web",
+    ]);
+    assert_eq!(out, "README.md 1\n");
+    assert_eq!(
+        acus(&["find", "needle", "-l", "-g", "!web/", "-g", "!src/"]).1,
+        "README.md 1\n"
+    );
+}
+
+#[test]
+fn find_accepts_extended_and_perl_flags() {
+    let plain = acus(&["find", "need(le|s)"]).1;
+    assert_eq!(acus(&["find", "-E", "need(le|s)"]).1, plain);
+    assert_eq!(acus(&["find", "-P", "need(le|s)"]).1, plain);
+    let (code, _, err) = acus(&["find", "-P", r"(?<=let )needle"]);
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("-P is accepted") && err.contains("no look-around"),
+        "{err}"
+    );
+}
+
+#[test]
+fn find_reads_bre_alternation() {
+    let (code, out, err) = acus(&["find", r"Usage\|Parser", "-l"]);
+    assert_eq!(code, 0);
+    assert_eq!(out, acus(&["find", "Usage|Parser", "-l"]).1);
+    assert!(err.contains("note: read `\\|` as alternation"), "{err}");
+    // ERE users keep their literal pipe; so do -E, -F and classes.
+    assert!(!acus(&["find", r"a|b\|c", "-l"]).2.contains("note:"));
+    assert!(
+        !acus(&["find", "-E", r"Usage\|Parser", "-l"])
+            .2
+            .contains("note:")
+    );
+    assert_eq!(acus(&["find", "-F", r"Usage\|Parser"]).0, 1);
+    assert_eq!(acus(&["find", r"[\|]x", "-l"]).0, 1);
+}
+
+#[test]
+fn grep_flags_work_inside_run() {
+    let (_, out, _) = acus_in(
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj")),
+        &["run"],
+        "find needle -c --include *.rs\nfind -o need\\w+ -g *.rs\nshow src/lib.rs:10,11\n",
+    );
+    assert!(out.contains("src/lib.rs 3\ntotal 3 in 1 files"), "{out}");
+    assert!(out.contains("11\tneedle"), "{out}");
+    assert!(out.contains("10\t") && !out.contains("error"), "{out}");
 }
 
 #[test]
@@ -237,6 +342,30 @@ fn patch_from_stdin() {
 }
 
 #[test]
+fn patch_reports_tolerant_matches_and_new_directives() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.py"), "def f():\n\treturn 1  \n").unwrap();
+    let p = "*** Update File: a.py\n def f():\n-    return 1\n+    return 2\n*** Copy File: a.py\n*** To: b.py\n*** Insert After: b.py:1\n+# top\n";
+    let (code, out, err) = acus_in(d.path(), &["patch", "-q"], p);
+    assert_eq!((code, err.as_str()), (0, ""), "{out}");
+    assert_eq!(
+        out,
+        "M a.py +1 -1\nA b.py +2\nM b.py +1 -0\nnote: tolerant match (whitespace/indentation) in a.py hunk 1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("b.py")).unwrap(),
+        "def f():\n# top\n\treturn 2\n"
+    );
+    let (code, _, err) = acus_in(
+        d.path(),
+        &["patch"],
+        "*** Update File: a.py\n-nothing like\n",
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("hunk 1: context not found"), "{err}");
+}
+
+#[test]
 fn commands_can_be_disabled_at_runtime() {
     let (code, _, err) = acus_env(&["find", "needle"], &[("ACUS_DISABLE", "usage, find")]);
     assert_eq!(code, 2);
@@ -360,6 +489,7 @@ fn guard_never_fails_on_malformed_input() {
     }
 }
 
+#[cfg(feature = "cmd-decide")]
 #[test]
 fn decide_without_key_warns_and_skips() {
     let env = [
@@ -415,6 +545,38 @@ fn run_batch() {
     );
     let (code, out, err) = acus_in(dir, &["run", "--json"], r#"[["find","zzz_none"]]"#);
     assert_eq!((code, out.as_str(), err.as_str()), (1, "null\n", ""));
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_tail_and_grep_keep_failures_and_their_code() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.rs"), "fn f() {\n    boom()\n}\n").unwrap();
+    let cmd =
+        "echo l1; echo l2; echo 'error: boom at a.rs:2:5'; echo; echo l3; echo l4; echo l5; exit 3";
+    let (code, out, _) = acus_in(d.path(), &["ctx", cmd, "--tail", "2"], "");
+    assert_eq!(code, 3);
+    assert!(
+        out.starts_with("… 2 lines dropped (--tail 2)\nerror: boom at a.rs:2:5\n… 1 line dropped (--tail 2)\nl4\nl5\n"),
+        "{out}"
+    );
+    assert!(out.contains("== a.rs#f (line 2)\n"), "{out}");
+    assert!(out.contains("… full output (7 lines)"), "{out}");
+
+    let (code, out, _) = acus_in(d.path(), &["ctx", cmd, "--grep", "^l[34]$"], "");
+    assert_eq!(code, 3);
+    assert!(
+        out.starts_with("l3\nl4\n… 5 lines not matching --grep dropped\n"),
+        "{out}"
+    );
+    assert!(!out.contains("a.rs#f"), "{out}");
+
+    let (_, out, _) = acus_in(d.path(), &["ctx", cmd, "--grep", "^error"], "");
+    assert!(out.contains("== a.rs#f (line 2)\n"), "{out}");
+
+    let (code, _, err) = acus_in(d.path(), &["ctx", cmd, "--grep", "("], "");
+    assert_eq!(code, 2);
+    assert!(err.contains("invalid --grep regex"), "{err}");
 }
 
 #[test]
