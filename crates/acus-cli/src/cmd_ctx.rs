@@ -33,6 +33,14 @@ pub struct Args {
     /// Also drop output lines matching this regex (repeatable), e.g. --drop '^warning: unused'.
     #[arg(long, value_name = "REGEX")]
     drop: Vec<String>,
+    /// Keep only the last N lines of the filtered output, plus every error and failure block and
+    /// the code they point at; the gaps say how many lines were dropped.
+    #[arg(long, value_name = "N")]
+    tail: Option<usize>,
+    /// Keep only output lines matching this regex, plus the code they point at. Applies after
+    /// the noise filter and --drop (so --raw to match noise), before --tail.
+    #[arg(long, value_name = "REGEX")]
+    grep: Option<String>,
 }
 
 /// Runs a command, prints its output, then the code its `path:line` references point at.
@@ -44,6 +52,13 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
             cfg.path.display()
         )
     })?;
+    let grep = a
+        .grep
+        .as_deref()
+        .map(Regex::new)
+        .transpose()
+        .context("invalid --grep regex")?;
+    let narrowing = a.tail.is_some() || grep.is_some();
     let command = match &a.command {
         Some(c) => c.clone(),
         None => {
@@ -78,9 +93,21 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     let text = if a.raw { raw.to_string() } else { clean(&raw) };
     let code = res.status.code().unwrap_or(1);
     let cwd = std::env::current_dir()?;
-    let refs = refs(&text, &cwd);
     if out.format == Format::Json {
-        let locs: Vec<_> = refs
+        let (text, found) = if narrowing {
+            let n = narrow(
+                text.lines().map(str::to_owned).collect(),
+                (a.tail, grep.as_ref()),
+                (a.max_output, a.max_lines),
+            );
+            let t = n.lines.join("\n");
+            let f = refs(&t, &cwd);
+            (t, f)
+        } else {
+            let f = refs(&text, &cwd);
+            (text, f)
+        };
+        let locs: Vec<_> = found
             .iter()
             .take(a.max_refs)
             .filter_map(|(p, l)| snippet(p, *l, &a))
@@ -98,11 +125,29 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     } else {
         quiet(&all, &extra)
     };
+    let nothing_matched = grep
+        .as_ref()
+        .is_some_and(|re| !lines.is_empty() && !lines.iter().any(|l| re.is_match(l)));
+    let narrowed = narrow(lines, (a.tail, grep.as_ref()), (a.max_output, a.max_lines));
+    let lines = narrowed.lines;
+    // Only what is shown decides which code is shown.
+    let refs = if narrowing {
+        refs(&lines.join("\n"), &cwd)
+    } else {
+        refs(&text, &cwd)
+    };
     let half = a.max_output.max(2) / 2;
-    let omitted = lines.len().saturating_sub(half * 2);
+    // --tail already bounds the output, and a cut must not hide the failures it keeps.
+    let omitted = if a.tail.is_some() {
+        0
+    } else {
+        lines.len().saturating_sub(half * 2)
+    };
     // Whatever is not printed stays readable without running the command again.
     // Dropped noise matters only when looking into a failure.
-    let log = (omitted > 0 || (dropped > 0 && code != 0))
+    let log = (omitted > 0
+        || narrowed.grep_dropped + narrowed.tail_dropped > 0
+        || (dropped > 0 && code != 0))
         .then(|| save_log(&cwd, &command, &text))
         .flatten();
     if omitted > 0 {
@@ -124,6 +169,22 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
             "{}",
             out.dim(&format!(
                 "… {dropped} noise lines dropped{tests} (--raw keeps them)"
+            ))
+        );
+    }
+    if narrowed.grep_dropped > 0 {
+        let why = if nothing_matched && dropped > 0 {
+            "; nothing matched, and the noise filter dropped lines (--raw matches those too)"
+        } else if nothing_matched {
+            "; nothing matched"
+        } else {
+            ""
+        };
+        println!(
+            "{}",
+            out.dim(&format!(
+                "… {} lines not matching --grep dropped{why}",
+                narrowed.grep_dropped
             ))
         );
     }
@@ -360,6 +421,91 @@ fn quiet(lines: &[&str], extra: &RegexSet) -> (Vec<String>, usize, usize) {
     (v, passed, dropped)
 }
 
+/// Lines starting an error or failure: compiler errors, failed tests, panics, tracebacks.
+static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^\s*(error(\[\w+\])?[:\s]|error TS\d+|Error:|FAILED\b|FAIL\b|failures:|--- FAIL|---- .+ ----$|thread '.*' panicked|Traceback \(most recent call last\)|AssertionError|not ok |Test Case .* failed|[×✗✖] )|\S: error[:\[ ]|panicked at |\btest .* FAILED$",
+    )
+    .unwrap()
+});
+
+/// What `--grep` and `--tail` left of the output.
+struct Narrowed {
+    lines: Vec<String>,
+    grep_dropped: usize,
+    tail_dropped: usize,
+}
+
+/// `--grep` keeps the matching lines; `--tail N` then keeps the last N of those and every
+/// failure block (from its first line up to the next blank line, at most `max_lines` lines, and
+/// at most `max_output` lines of them in all). Each gap becomes a "… K lines dropped" line;
+/// blank lines are dropped without being counted.
+fn narrow(
+    mut lines: Vec<String>,
+    (tail, grep): (Option<usize>, Option<&Regex>),
+    (max_output, max_lines): (usize, usize),
+) -> Narrowed {
+    let before = lines.len();
+    if let Some(re) = grep {
+        lines.retain(|l| re.is_match(l));
+    }
+    let grep_dropped = before - lines.len();
+    let Some(n) = tail else {
+        return Narrowed {
+            lines,
+            grep_dropped,
+            tail_dropped: 0,
+        };
+    };
+    let len = lines.len();
+    let mut keep = vec![false; len];
+    keep[len.saturating_sub(n)..].fill(true);
+    let mut budget = max_output;
+    let mut i = 0;
+    while i < len && budget > 0 {
+        if !FAILURE.is_match(&lines[i]) {
+            i += 1;
+            continue;
+        }
+        let end = (i + 1..len)
+            .find(|&j| lines[j].trim().is_empty())
+            .unwrap_or(len)
+            .min(i + max_lines.max(1));
+        for k in keep.iter_mut().take(end).skip(i) {
+            if !*k && budget > 0 {
+                *k = true;
+                budget -= 1;
+            }
+        }
+        i = end;
+    }
+    let mut out = Vec::new();
+    let mut tail_dropped = 0;
+    let mut gap = 0;
+    let mut flush = |out: &mut Vec<String>, gap: &mut usize| {
+        if *gap > 0 {
+            let s = if *gap == 1 { "" } else { "s" };
+            out.push(format!("… {} line{s} dropped (--tail {n})", *gap));
+            tail_dropped += *gap;
+            *gap = 0;
+        }
+    };
+    for (l, k) in lines.into_iter().zip(keep) {
+        if k {
+            flush(&mut out, &mut gap);
+            out.push(l);
+        } else if !l.trim().is_empty() {
+            gap += 1;
+        }
+    }
+    flush(&mut out, &mut gap);
+    Narrowed {
+        lines: out,
+        grep_dropped,
+        tail_dropped,
+    }
+}
+
 /// `path:line` references to files under `cwd`, first occurrence order, one per enclosing
 /// region is decided later. Handles `a.rs:3:5`, `a.ts(3,5)` and Python's `File "a.py", line 3`.
 fn refs(text: &str, cwd: &Path) -> Vec<(PathBuf, usize)> {
@@ -465,8 +611,74 @@ fn snippet(path: &Path, line: usize, a: &Args) -> Option<(String, usize, Vec<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{candidates, clean, detect_command, quiet};
-    use regex::RegexSet;
+    use super::{candidates, clean, detect_command, narrow, quiet};
+    use regex::{Regex, RegexSet};
+
+    fn lines(s: &str) -> Vec<String> {
+        s.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn tail_keeps_the_last_lines_and_every_failure_block() {
+        let mut out = String::new();
+        for i in 0..30 {
+            out += &format!("line {i}\n");
+        }
+        out += "error[E0425]: cannot find value `x`\n --> src/a.rs:3:5\n  |\n3 | x\n\n";
+        for i in 30..40 {
+            out += &format!("line {i}\n");
+        }
+        let n = narrow(lines(&out), (Some(3), None), (200, 40));
+        assert_eq!(
+            n.lines,
+            [
+                "… 30 lines dropped (--tail 3)",
+                "error[E0425]: cannot find value `x`",
+                " --> src/a.rs:3:5",
+                "  |",
+                "3 | x",
+                "… 7 lines dropped (--tail 3)",
+                "line 37",
+                "line 38",
+                "line 39",
+            ]
+        );
+        assert_eq!((n.grep_dropped, n.tail_dropped), (0, 37));
+        // Short output is untouched, and --tail 0 keeps only the failures.
+        assert_eq!(
+            narrow(lines("a\nb"), (Some(5), None), (200, 40)).lines,
+            ["a", "b"]
+        );
+        let n = narrow(lines("a\nFAILED\n\nb"), (Some(0), None), (200, 40));
+        assert_eq!(
+            n.lines,
+            [
+                "… 1 line dropped (--tail 0)",
+                "FAILED",
+                "… 1 line dropped (--tail 0)"
+            ]
+        );
+    }
+
+    #[test]
+    fn tail_caps_failure_blocks_at_max_output() {
+        let out: String = (0..20).map(|i| format!("error: e{i}\n\n")).collect();
+        let n = narrow(lines(&out), (Some(0), None), (5, 40));
+        assert_eq!(n.lines.iter().filter(|l| l.starts_with("error")).count(), 5);
+        assert_eq!(n.tail_dropped, 15);
+    }
+
+    #[test]
+    fn grep_keeps_matching_lines_then_tail_applies_to_them() {
+        let re = Regex::new("^warn").unwrap();
+        let l = lines("warn 1\nok\nwarn 2\nok\nwarn 3");
+        let n = narrow(l.clone(), (None, Some(&re)), (200, 40));
+        assert_eq!(n.lines, ["warn 1", "warn 2", "warn 3"]);
+        assert_eq!((n.grep_dropped, n.tail_dropped), (2, 0));
+        let n = narrow(l, (Some(1), Some(&re)), (200, 40));
+        assert_eq!(n.lines, ["… 2 lines dropped (--tail 1)", "warn 3"]);
+        assert_eq!((n.grep_dropped, n.tail_dropped), (2, 2));
+    }
 
     #[test]
     fn detects_project_command() {

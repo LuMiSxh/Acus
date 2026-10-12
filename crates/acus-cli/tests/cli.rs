@@ -417,6 +417,38 @@ fn run_batch() {
     assert_eq!((code, out.as_str(), err.as_str()), (1, "null\n", ""));
 }
 
+#[cfg(unix)]
+#[test]
+fn ctx_tail_and_grep_keep_failures_and_their_code() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.rs"), "fn f() {\n    boom()\n}\n").unwrap();
+    let cmd =
+        "echo l1; echo l2; echo 'error: boom at a.rs:2:5'; echo; echo l3; echo l4; echo l5; exit 3";
+    let (code, out, _) = acus_in(d.path(), &["ctx", cmd, "--tail", "2"], "");
+    assert_eq!(code, 3);
+    assert!(
+        out.starts_with("… 2 lines dropped (--tail 2)\nerror: boom at a.rs:2:5\n… 1 line dropped (--tail 2)\nl4\nl5\n"),
+        "{out}"
+    );
+    assert!(out.contains("== a.rs#f (line 2)\n"), "{out}");
+    assert!(out.contains("… full output (7 lines)"), "{out}");
+
+    let (code, out, _) = acus_in(d.path(), &["ctx", cmd, "--grep", "^l[34]$"], "");
+    assert_eq!(code, 3);
+    assert!(
+        out.starts_with("l3\nl4\n… 5 lines not matching --grep dropped\n"),
+        "{out}"
+    );
+    assert!(!out.contains("a.rs#f"), "{out}");
+
+    let (_, out, _) = acus_in(d.path(), &["ctx", cmd, "--grep", "^error"], "");
+    assert!(out.contains("== a.rs#f (line 2)\n"), "{out}");
+
+    let (code, _, err) = acus_in(d.path(), &["ctx", cmd, "--grep", "("], "");
+    assert_eq!(code, 2);
+    assert!(err.contains("invalid --grep regex"), "{err}");
+}
+
 #[test]
 fn ctx_shows_code_behind_output_references() {
     let d = tempfile::tempdir().unwrap();
