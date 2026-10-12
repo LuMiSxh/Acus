@@ -111,6 +111,21 @@ pub struct Chains {
     pub longest: u64,
 }
 
+/// One row of `acus usage --agents`: every transcript is one spawn of a role
+/// (`main` for top-level sessions, the subagent type otherwise).
+#[derive(Debug, Default, Serialize)]
+pub struct AgentStat {
+    pub role: String,
+    pub spawns: u64,
+    pub models: Vec<String>,
+    pub median_requests: f64,
+    /// Median of input + cache read + cache write of each spawn's first request.
+    pub median_first_context: f64,
+    pub weighted: f64,
+    pub share: f64,
+    pub median_weighted: f64,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
     pub total: Tokens,
@@ -122,6 +137,7 @@ pub struct Report {
     pub sessions: Vec<Session>,
     pub tools: Vec<ToolStat>,
     pub chains: Chains,
+    pub agents: Vec<AgentStat>,
     /// Tool-call categories → calls per agent `[claude, codex]`.
     #[serde(skip)]
     pub categories: BTreeMap<&'static str, [u64; 2]>,
@@ -133,6 +149,13 @@ pub(crate) struct FileStats {
     pub agent: &'static str,
     pub session: String,
     pub cwd: String,
+    /// Subagent type (`main` for top-level sessions); empty until resolved.
+    pub role: String,
+    pub is_subagent: bool,
+    /// Parent tool call that spawned this subagent (from the meta file).
+    pub spawn_id: Option<String>,
+    /// (tool_use id, subagent_type) of Agent calls made in this file.
+    pub spawns: Vec<(String, String)>,
     /// (dedup id, model, tokens of one request)
     pub requests: Vec<(Option<String>, String, Tokens)>,
     pub compactions: u32,
@@ -203,6 +226,21 @@ pub fn report(o: &UsageOpts) -> Result<Report> {
             };
             st.agent = agent;
             st.session = session_id(&root, p, agent);
+            st.is_subagent = agent == "claude"
+                && p.parent()
+                    .and_then(|d| d.file_name())
+                    .is_some_and(|n| n == "subagents");
+            if st.is_subagent {
+                let meta: serde_json::Value =
+                    std::fs::read_to_string(p.with_extension("meta.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                st.role = meta["agentType"].as_str().unwrap_or_default().to_owned();
+                st.spawn_id = meta["toolUseId"].as_str().map(str::to_owned);
+            } else {
+                st.role = "main".into();
+            }
             files.lock().unwrap().push(st);
         })?;
     }
@@ -212,6 +250,19 @@ pub fn report(o: &UsageOpts) -> Result<Report> {
         files.retain(|f| f.cwd.to_lowercase().contains(&q));
     }
     files.sort_by(|a, b| a.session.cmp(&b.session));
+    // Subagents without an `agentType` take the type of the parent's Agent call.
+    let spawned: HashMap<String, String> = files
+        .iter()
+        .flat_map(|f| f.spawns.iter().cloned())
+        .collect();
+    for f in files.iter_mut().filter(|f| f.role.is_empty()) {
+        f.role = f
+            .spawn_id
+            .as_ref()
+            .and_then(|id| spawned.get(id))
+            .cloned()
+            .unwrap_or_else(|| "subagent".into());
+    }
     Ok(merge(files))
 }
 
@@ -237,6 +288,7 @@ fn merge(files: Vec<FileStats>) -> Report {
     let mut models: HashMap<String, Tokens> = HashMap::new();
     let mut tools: HashMap<String, ToolStat> = HashMap::new();
     let mut contexts = Vec::new();
+    let mut roles: HashMap<String, Vec<Spawn>> = HashMap::new();
     for f in files {
         let project = Path::new(&f.cwd)
             .file_name()
@@ -261,10 +313,12 @@ fn merge(files: Vec<FileStats>) -> Report {
         for c in &f.categories {
             r.categories.entry(c).or_default()[usize::from(f.agent == "codex")] += 1;
         }
+        let mut spawn = Spawn::default();
         for (id, model, t) in f.requests {
             if id.is_some_and(|id| !seen.insert(id)) {
                 continue;
             }
+            spawn.add(&model, &t);
             s.tokens.add(&t);
             s.max_context = s.max_context.max(t.context());
             contexts.push(t.context());
@@ -275,6 +329,9 @@ fn merge(files: Vec<FileStats>) -> Report {
             }
         }
         s.compactions += f.compactions;
+        if spawn.requests > 0 {
+            roles.entry(f.role.clone()).or_default().push(spawn);
+        }
         s.prompts += f.prompts;
         r.prompts += f.prompts;
         let mut run = 0u64;
@@ -324,9 +381,69 @@ fn merge(files: Vec<FileStats>) -> Report {
     r.models
         .sort_by(|a, b| b.1.weighted().total_cmp(&a.1.weighted()));
     r.tools = tools.into_values().collect();
+    r.agents = agent_stats(roles, r.weighted);
     r.tools
         .sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
     r
+}
+
+/// One transcript's requests after dedup.
+#[derive(Default)]
+struct Spawn {
+    requests: u64,
+    first_context: u64,
+    weighted: f64,
+    models: HashMap<String, u64>,
+}
+
+impl Spawn {
+    fn add(&mut self, model: &str, t: &Tokens) {
+        if self.requests == 0 {
+            self.first_context = t.context();
+        }
+        self.requests += 1;
+        self.weighted += t.weighted();
+        if !model.is_empty() && model != "<synthetic>" {
+            *self.models.entry(model.to_owned()).or_default() += 1;
+        }
+    }
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    match v.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => v[n / 2],
+        n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+    }
+}
+
+fn agent_stats(roles: HashMap<String, Vec<Spawn>>, total: f64) -> Vec<AgentStat> {
+    let mut out: Vec<AgentStat> = roles
+        .into_iter()
+        .map(|(role, spawns)| {
+            let col = |f: fn(&Spawn) -> f64| median(spawns.iter().map(f).collect());
+            let mut models: HashMap<&str, u64> = HashMap::new();
+            for (m, n) in spawns.iter().flat_map(|s| &s.models) {
+                *models.entry(m).or_default() += n;
+            }
+            let mut models: Vec<_> = models.into_iter().collect();
+            models.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            let weighted = spawns.iter().map(|s| s.weighted).sum::<f64>();
+            AgentStat {
+                spawns: spawns.len() as u64,
+                models: models.into_iter().map(|(m, _)| m.to_owned()).collect(),
+                median_requests: col(|s| s.requests as f64),
+                median_first_context: col(|s| s.first_context as f64),
+                weighted,
+                share: weighted / total.max(1.0),
+                median_weighted: col(|s| s.weighted),
+                role,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.weighted.total_cmp(&a.weighted).then(a.role.cmp(&b.role)));
+    out
 }
 
 fn close_chain(c: &mut Chains, run: &mut u64) {

@@ -79,3 +79,62 @@ fn project_filter() {
     .unwrap();
     assert!(r.sessions.is_empty());
 }
+
+#[test]
+fn agents_one_row_per_role() {
+    let line = |id: &str, model: &str, input: u64| {
+        format!(
+            r#"{{"type":"assistant","cwd":"/x/Proj","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"cache_read_input_tokens":100,"output_tokens":10}},"content":[]}}}}"#
+        )
+    };
+    let d = tempfile::tempdir().unwrap();
+    let sub = d.path().join("-x-Proj/s1/subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let main = format!(
+        "{}\n{}\n{}\n",
+        line("m1", "opus", 50),
+        line("m2", "opus", 0),
+        r#"{"type":"assistant","message":{"id":"m3","model":"opus","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"subagent_type":"worker-lite"}}]}}"#
+    );
+    fs::write(d.path().join("-x-Proj/s1.jsonl"), main).unwrap();
+    let a = format!("{}\n{}\n", line("a1", "haiku", 20), line("a2", "haiku", 0));
+    fs::write(sub.join("agent-a.jsonl"), a).unwrap();
+    fs::write(sub.join("agent-a.meta.json"), r#"{"agentType":"worker"}"#).unwrap();
+    // No agentType: role comes from the parent's Agent call.
+    fs::write(sub.join("agent-b.jsonl"), line("b1", "haiku", 5)).unwrap();
+    fs::write(sub.join("agent-b.meta.json"), r#"{"toolUseId":"toolu_b"}"#).unwrap();
+
+    let r = report(&UsageOpts {
+        claude_root: Some(d.path().to_owned()),
+        codex_root: Some(d.path().join("none")),
+        ..Default::default()
+    })
+    .unwrap();
+    let rows: Vec<_> = r
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.role.as_str(),
+                a.spawns,
+                a.median_requests,
+                a.median_first_context,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("main", 1, 3.0, 150.0),
+            ("worker", 1, 2.0, 120.0),
+            ("worker-lite", 1, 1.0, 105.0)
+        ]
+    );
+    assert_eq!(r.agents[1].models, ["haiku"]);
+    // (20 + 10 + 50) + (0 + 10 + 50)
+    assert_eq!(r.agents[1].weighted, 140.0);
+    let share: f64 = r.agents.iter().map(|a| a.share).sum();
+    assert!((share - 1.0).abs() < 1e-9);
+    // Existing views still count subagents in their parent session.
+    assert_eq!(r.sessions.len(), 1);
+}

@@ -1,7 +1,7 @@
 use crate::Outcome;
 use crate::config::Config;
 use crate::fmt::{Format, Out};
-use acus_usage::{Report, UsageOpts, WEIGHTS, group, report};
+use acus_usage::{AgentStat, Report, UsageOpts, WEIGHTS, group, report};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -28,6 +28,9 @@ pub struct Args {
     /// Count `acus guard` decisions per rule and list the calls run through its escape.
     #[arg(long)]
     guard: bool,
+    /// One row per role (main, worker, worker-lite, ...): spawns, models, requests, preamble size and cost per spawn.
+    #[arg(long)]
+    agents: bool,
 }
 
 /// 1234567 → "1.2M".
@@ -55,6 +58,9 @@ pub fn run(a: Args, out: &Out, cfg: &Config) -> Result<Outcome> {
     }
     if a.tools {
         return tools(&r, out);
+    }
+    if a.agents {
+        return agents(&r.agents, out);
     }
     if out.format == Format::Json {
         println!("{}", serde_json::to_string(&r)?);
@@ -211,6 +217,34 @@ fn guard(a: &Args, out: &Out, cfg: &Config) -> Result<Outcome> {
                 e["call"].as_str().unwrap_or_default().replace('\n', "⏎")
             );
         }
+    }
+    Ok(Outcome::Found)
+}
+
+/// Codex transcripts carry no roles and count under `main`.
+fn agents(rows: &[AgentStat], out: &Out) -> Result<Outcome> {
+    if out.format == Format::Json {
+        println!("{}", serde_json::to_string(rows)?);
+        return Ok(Outcome::Found);
+    }
+    println!(
+        "{}",
+        out.header(
+            "role spawns models median-reqs median-first-ctx weighted share median-weighted/spawn"
+        )
+    );
+    for a in rows {
+        println!(
+            "  {} {} {} {:.0} {} {} {:.1}% {}",
+            a.role,
+            a.spawns,
+            a.models.join(","),
+            a.median_requests,
+            k(a.median_first_context),
+            k(a.weighted),
+            100.0 * a.share,
+            k(a.median_weighted)
+        );
     }
     Ok(Outcome::Found)
 }
