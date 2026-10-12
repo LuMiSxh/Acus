@@ -19,6 +19,10 @@ pub struct FindOpts {
     pub syntax: bool,
     /// Match whole words only.
     pub word: bool,
+    /// Report the lines that do not match (grep -v).
+    pub invert: bool,
+    /// Stop after this many hit lines per file (grep -m).
+    pub max_per_file: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +32,9 @@ pub struct Hit {
     #[serde(skip)]
     pub col: usize,
     pub text: String,
+    /// Byte ranges of every match in `text`; empty for inverted hits.
+    #[serde(skip)]
+    pub spans: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,21 +70,29 @@ pub fn find(o: &FindOpts) -> Result<Vec<FileHits>> {
         let mut searcher = SearcherBuilder::new()
             .binary_detection(BinaryDetection::quit(0))
             .line_number(true)
+            .invert_match(o.invert)
             .build();
         let mut hits = Vec::new();
         let sink = Lossy(|n, line| {
             let text = line.trim_end_matches(['\n', '\r']);
-            let col = matcher
-                .find(text.as_bytes())
-                .ok()
-                .flatten()
-                .map_or(0, |m| m.start());
+            let mut spans = Vec::new();
+            if !o.invert {
+                let _ = matcher.find_iter(text.as_bytes(), |m| {
+                    // An empty match would print nothing and could loop on its own position.
+                    if m.end() > m.start() {
+                        spans.push((m.start(), m.end()));
+                    }
+                    true
+                });
+            }
+            let col = spans.first().map_or(0, |s| s.0);
             hits.push(Hit {
                 line: n as usize,
                 col,
                 text: text.to_owned(),
+                spans,
             });
-            Ok(true)
+            Ok(o.max_per_file.is_none_or(|m| hits.len() < m))
         });
         if searcher.search_slice(&matcher, &bytes, sink).is_err() || hits.is_empty() {
             return;

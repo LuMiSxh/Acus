@@ -25,6 +25,8 @@ fn opts(d: &tempfile::TempDir, pats: &[&str]) -> FindOpts {
         fixed: false,
         syntax: true,
         word: false,
+        invert: false,
+        max_per_file: None,
     }
 }
 
