@@ -489,6 +489,7 @@ fn guard_never_fails_on_malformed_input() {
     }
 }
 
+#[cfg(feature = "cmd-decide")]
 #[test]
 fn decide_without_key_warns_and_skips() {
     let env = [
