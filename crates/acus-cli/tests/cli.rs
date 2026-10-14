@@ -453,10 +453,46 @@ fn guard_answers_hook_calls() {
         "tool_name": "Bash",
         "tool_input": {"command": "cd app && ls; cat settings.json; grep -n foo src/a.rs | head"},
     }));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert_eq!(o["permissionDecision"], "allow", "{out}");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "cd app && ls; cat settings.json; acus find 'foo' 'src/a.rs' | head",
+        "{out}"
+    );
+    assert!(
+        o["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("instead of `grep -n foo src/a.rs`"),
+        "{out}"
+    );
+    // Other tool_input fields survive; a build pipe is refused unless permissions are bypassed.
+    let build = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cargo test 2>&1 | tail -3", "timeout": 5000},
+    });
+    let out = guard(build.clone());
+    assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
+    assert!(out.contains("acus ctx 'cargo test' --tail 3"), "{out}");
+    let mut bypass = build;
+    bypass["permission_mode"] = "bypassPermissions".into();
+    let v: serde_json::Value = serde_json::from_str(&guard(bypass)).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert_eq!(o["permissionDecision"], "allow");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "acus ctx 'cargo test' --tail 3"
+    );
+    assert_eq!(o["updatedInput"]["timeout"], 5000);
+    // In-place edits have no exact rewrite.
+    let out = guard(serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd app && cat a.rs; sed -i 's/a/b/' b.rs"},
+    }));
     assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
     assert!(out.contains("Nothing ran"), "{out}");
-    assert!(out.contains("`grep -n foo src/a.rs`"), "{out}");
-    assert!(out.contains("`acus find 'foo' 'src/a.rs'`"), "{out}");
 }
 
 #[test]
