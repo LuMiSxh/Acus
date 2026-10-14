@@ -461,26 +461,23 @@ fn guard_answers_hook_calls() {
         "cd app && ls; cat settings.json; acus find 'foo' 'src/a.rs' | head",
         "{out}"
     );
+    assert!(o.get("permissionDecisionReason").is_none(), "{out}");
     assert!(
-        o["permissionDecisionReason"]
+        o["additionalContext"]
             .as_str()
             .unwrap()
             .contains("instead of `grep -n foo src/a.rs`"),
         "{out}"
     );
-    // Other tool_input fields survive; a build pipe is refused unless permissions are bypassed.
+    // Other tool_input fields survive; a build pipe is rewritten in every mode, with no decision.
     let build = serde_json::json!({
         "tool_name": "Bash",
+        "permission_mode": "default",
         "tool_input": {"command": "cargo test 2>&1 | tail -3", "timeout": 5000},
     });
-    let out = guard(build.clone());
-    assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
-    assert!(out.contains("acus ctx 'cargo test' --tail 3"), "{out}");
-    let mut bypass = build;
-    bypass["permission_mode"] = "bypassPermissions".into();
-    let v: serde_json::Value = serde_json::from_str(&guard(bypass)).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&guard(build)).unwrap();
     let o = &v["hookSpecificOutput"];
-    assert_eq!(o["permissionDecision"], "allow");
+    assert!(o.get("permissionDecision").is_none(), "{v}");
     assert_eq!(
         o["updatedInput"]["command"],
         "acus ctx 'cargo test' --tail 3"

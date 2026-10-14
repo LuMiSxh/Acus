@@ -25,27 +25,23 @@ pub fn run(_: Args, cfg: &Config) -> Result<Outcome> {
     let scope = Scope::new(cwd);
     // Codex hooks (they carry a `turn_id`) cannot rewrite a call, only refuse it.
     let rewritten = (v["tool_name"].as_str() == Some("Bash") && v.get("turn_id").is_none())
-        .then(|| {
-            rewrite(
-                command,
-                scope.as_ref(),
-                v["permission_mode"] == "bypassPermissions",
-            )
-        })
+        .then(|| rewrite(command, scope.as_ref()))
         .flatten();
     if let Some(rw) = rewritten {
         log(cfg, &v, &Verdict::Rewrite(rw.rule));
         let mut updated = input.clone();
         updated["command"] = rw.command.into();
-        let out = serde_json::json!({ "hookSpecificOutput": {
+        let mut hook = serde_json::json!({
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "permissionDecisionReason": rw.note,
             "updatedInput": updated,
-            // `allow` reasons may only be shown to the user; the context reaches the agent.
+            // No permissionDecisionReason: an allow reason would reach only the user, not the agent.
             "additionalContext": rw.note,
-        }});
-        println!("{out}");
+        });
+        // A build is left undecided, so Claude Code's permission flow decides on the rewritten command.
+        if !rw.deferred {
+            hook["permissionDecision"] = "allow".into();
+        }
+        println!("{}", serde_json::json!({ "hookSpecificOutput": hook }));
         return Ok(Outcome::Found);
     }
     let verdict = match v["tool_name"].as_str() {
@@ -1424,12 +1420,14 @@ struct Rewrite {
     /// What was run instead of what, for the agent.
     note: String,
     rule: &'static str,
+    /// A build or test was rewritten, so the hook gives no permission decision.
+    deferred: bool,
 }
 
 /// Rewrites every segment the guard would refuse, when each has an exact acus replacement;
-/// `None` (refuse as usual) if any segment has none. A build or test runs only in
-/// `bypassPermissions`, where nothing would have asked first; reads are safe to allow.
-fn rewrite(cmd: &str, scope: Option<&Scope>, bypass: bool) -> Option<Rewrite> {
+/// `None` (refuse as usual) if any segment has none. A rewritten build is `deferred`: the
+/// permission flow decides on it, as it does for a build the agent runs itself.
+fn rewrite(cmd: &str, scope: Option<&Scope>) -> Option<Rewrite> {
     if ["<<", "$(", "`", "acus-skip"]
         .iter()
         .any(|m| cmd.contains(m))
@@ -1442,7 +1440,7 @@ fn rewrite(cmd: &str, scope: Option<&Scope>, bypass: bool) -> Option<Rewrite> {
         .map(|&(a, b, piped)| (cmd[a..b].to_owned(), piped))
         .collect();
     let (mut out, mut at, mut i) = (String::new(), 0, 0);
-    let (mut notes, mut first) = (Vec::new(), None);
+    let (mut notes, mut first, mut deferred) = (Vec::new(), None, false);
     while i < segs.len() {
         let (seg, piped) = &segs[i];
         let (escaped, plain) = unescape(seg);
@@ -1454,7 +1452,7 @@ fn rewrite(cmd: &str, scope: Option<&Scope>, bypass: bool) -> Option<Rewrite> {
             .get(i + 1)
             .and_then(|next| filtered_build(plain, next, plain, &next.0));
         let (last, kind, new) = match pair {
-            Some(Verdict::Deny("build-pipe", _)) if bypass => {
+            Some(Verdict::Deny("build-pipe", _)) => {
                 (i + 1, "build-pipe", rewrite_build(plain, &segs[i + 1].0)?)
             }
             Some(Verdict::Deny(..)) => return None,
@@ -1475,6 +1473,7 @@ fn rewrite(cmd: &str, scope: Option<&Scope>, bypass: bool) -> Option<Rewrite> {
         notes.push(format!("ran `{new}` instead of `{old}`"));
         out.push_str(&cmd[at..from]);
         out.push_str(&new);
+        deferred |= kind == "build-pipe";
         (at, i, first) = (to, last + 1, first.or(Some(kind)));
     }
     out.push_str(&cmd[at..]);
@@ -1489,6 +1488,7 @@ fn rewrite(cmd: &str, scope: Option<&Scope>, bypass: bool) -> Option<Rewrite> {
             notes.join("; ")
         ),
         rule: first?,
+        deferred,
     })
 }
 
@@ -1973,7 +1973,7 @@ mod tests {
 
     #[test]
     fn rewrites_reads_and_searches_into_acus_calls() {
-        let rw = |cmd: &str| rewrite(cmd, None, false).map(|r| r.command);
+        let rw = |cmd: &str| rewrite(cmd, None).map(|r| r.command);
         let cases = [
             ("cat src/a.rs", "acus show 'src/a.rs'"),
             ("head -n 40 src/a.rs", "acus show 'src/a.rs:1-40'"),
@@ -1987,7 +1987,8 @@ mod tests {
         for (cmd, want) in cases {
             assert_eq!(rw(cmd).as_deref(), Some(want), "{cmd}");
         }
-        let r = rewrite("sed -n 1,40p a.rs", None, false).unwrap();
+        let r = rewrite("sed -n 1,40p a.rs", None).unwrap();
+        assert!(!r.deferred);
         assert_eq!(
             r.note,
             "acus guard: ran `acus show 'a.rs:1-40'` instead of `sed -n 1,40p a.rs`. The command was rewritten, not refused; use acus directly next time."
@@ -2014,8 +2015,8 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_build_pipes_only_in_bypass_permissions() {
-        let rw = |cmd: &str, bypass| rewrite(cmd, None, bypass).map(|r| r.command);
+    fn rewrites_build_pipes_into_deferred_acus_calls() {
+        let rw = |cmd: &str| rewrite(cmd, None).map(|r| r.command);
         for (cmd, want) in [
             (
                 "cargo test 2>&1 | tail -3",
@@ -2026,17 +2027,15 @@ mod tests {
                 "cd app && acus ctx 'swift build' --grep 'error' && echo ok",
             ),
         ] {
-            assert_eq!(rw(cmd, true).as_deref(), Some(want), "{cmd}");
-            assert_eq!(rw(cmd, false), None, "{cmd}");
+            assert_eq!(rw(cmd).as_deref(), Some(want), "{cmd}");
+            assert!(rewrite(cmd, None).unwrap().deferred, "{cmd}");
         }
-        // A read next to a build pipe is not rewritten alone.
-        assert_eq!(rw("cat a.rs; cargo test | tail -3", false), None);
-        assert_eq!(
-            rw("cat a.rs; cargo test | tail -3", true).as_deref(),
-            Some("acus show 'a.rs'; acus ctx 'cargo test' --tail 3")
-        );
+        // A read next to a build pipe is rewritten too, and the whole command is deferred.
+        let r = rewrite("cat a.rs; cargo test | tail -3", None).unwrap();
+        assert_eq!(r.command, "acus show 'a.rs'; acus ctx 'cargo test' --tail 3");
+        assert!(r.deferred);
         // A filter ctx has no flag for stays refused.
-        assert_eq!(rw("cargo test | tail -n +5", true), None);
+        assert_eq!(rw("cargo test | tail -n +5"), None);
     }
 
     #[test]
