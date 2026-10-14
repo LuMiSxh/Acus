@@ -7,6 +7,7 @@ use std::path::Path;
 #[derive(clap::Args)]
 pub struct Args {
     /// Optional revision (default HEAD, or `A..B`), then paths to limit to.
+    #[arg(value_parser = crate::home::<String>)]
     args: Vec<String>,
     /// Number of commits.
     #[arg(short = 'n', long, default_value_t = 15)]

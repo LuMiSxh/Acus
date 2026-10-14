@@ -12,7 +12,7 @@ pub struct Args {
     #[arg(long)]
     state: Option<String>,
     /// Read the text to judge from a file.
-    #[arg(long, conflicts_with = "state")]
+    #[arg(long, conflicts_with = "state", value_parser = crate::home::<PathBuf>)]
     state_file: Option<PathBuf>,
     /// Choice option as NAME=DESCRIPTION (repeatable); default is yes/no.
     #[arg(long = "choice", value_name = "NAME=DESC")]
@@ -21,7 +21,7 @@ pub struct Args {
     #[arg(long, value_delimiter = ',', conflicts_with = "choices")]
     score: Vec<String>,
     /// Image to judge (Clef only; repeatable, at most 4).
-    #[arg(long = "image")]
+    #[arg(long = "image", value_parser = crate::home::<PathBuf>)]
     images: Vec<PathBuf>,
 }
 

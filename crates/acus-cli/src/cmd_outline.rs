@@ -9,7 +9,7 @@ use std::sync::Mutex;
 #[derive(clap::Args)]
 pub struct Args {
     /// Files or directories (directories are walked).
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = crate::home::<PathBuf>)]
     paths: Vec<PathBuf>,
     /// Only symbols nested less than N deep (1 = top level).
     #[arg(long)]

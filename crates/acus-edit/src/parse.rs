@@ -117,6 +117,45 @@ fn insert_addr(rest: &str, n: usize, directive: &str) -> Result<(String, InsertA
     }
 }
 
+/// Expands a leading `~` in every path the ops name: no shell runs on patch text.
+fn expand_home(ops: &mut [Op]) {
+    fn home(p: &mut String) {
+        *p = acus_walk::expand_home(p);
+    }
+    for op in ops {
+        match op {
+            Op::Add { path, .. }
+            | Op::Delete { path }
+            | Op::ReplaceSymbol { path, .. }
+            | Op::DeleteSymbol { path, .. }
+            | Op::Insert { path, .. } => home(path),
+            Op::Update { path, move_to, .. } => {
+                home(path);
+                if let Some(p) = move_to {
+                    home(p);
+                }
+            }
+            Op::ReplaceAll { paths, .. } => paths.iter_mut().for_each(home),
+            Op::MoveSymbol { path, to, .. } => {
+                home(path);
+                if let Some(dest) = to {
+                    match dest {
+                        Dest::Before { path, .. }
+                        | Dest::After { path, .. }
+                        | Dest::End { path } => home(path),
+                    }
+                }
+            }
+            Op::Copy { from, to } => {
+                home(from);
+                if let Some(p) = to {
+                    home(p);
+                }
+            }
+        }
+    }
+}
+
 pub fn parse(text: &str) -> Result<Vec<Op>> {
     /// The accepted directives, as the unknown-directive error lists them.
     const DIRECTIVES: &str = "*** Add File: PATH | *** Update File: PATH | *** Delete File: PATH | *** Move to: PATH (after Update File) | *** Copy File: PATH (then *** To: PATH) | *** Replace Symbol: PATH#Symbol | *** Insert Before: PATH#Symbol or PATH:LINE (then `+` lines) | *** Insert After: PATH#Symbol or PATH:LINE (then `+` lines) | *** Delete Symbol: PATH#Symbol | *** Move Symbol: PATH#Symbol (then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH) | *** Replace All: PATH [PATH...] (files, directories or globs, then `<<<<<<< SEARCH` or `<<<<<<< REGEX`, `=======`, `>>>>>>> REPLACE`; see `acus patch --help`)";
@@ -317,6 +356,7 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
     if ops.is_empty() {
         bail!("empty patch\nhint: start with `*** Update File: PATH`");
     }
+    expand_home(&mut ops);
     Ok(ops)
 }
 

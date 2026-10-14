@@ -292,9 +292,19 @@ fn show_json() {
 }
 
 fn acus_in(dir: &std::path::Path, args: &[&str], stdin: &str) -> (i32, String, String) {
+    acus_in_env(dir, args, stdin, &[])
+}
+
+fn acus_in_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    stdin: &str,
+    env: &[(&str, &str)],
+) -> (i32, String, String) {
     use std::io::Write;
     let mut child = bin()
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -363,6 +373,70 @@ fn patch_reports_tolerant_matches_and_new_directives() {
     );
     assert_eq!(code, 2);
     assert!(err.contains("hunk 1: context not found"), "{err}");
+}
+
+#[test]
+fn tilde_paths_expand_to_home() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::write(h.join("w.rs"), "fn worker() {}\nfn other() {}\n").unwrap();
+    let env = [("HOME", h.to_str().unwrap())];
+    // Command-line arguments: a symbol and a range, with the address suffix kept.
+    let (code, out, err) = acus_env(&["show", "~/w.rs#worker", "~/w.rs:2-2"], &env);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("fn worker() {}") && out.contains("fn other() {}"),
+        "{out}"
+    );
+    // Lines of `acus run` get no shell either.
+    let (code, out, err) = acus_in_env(h, &["run"], "show ~/w.rs:1-1\n", &env);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("fn worker() {}"), "{out}");
+    // Paths named inside patch text, and the patch file itself.
+    std::fs::write(
+        h.join("p.patch"),
+        "*** Begin Patch\n*** Update File: ~/w.rs\n-fn other() {}\n+fn other() { 1 }\n*** End Patch\n",
+    )
+    .unwrap();
+    let (code, _, err) = acus_in_env(h, &["patch", "-q", "--file", "~/p.patch"], "", &env);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(h.join("w.rs")).unwrap(),
+        "fn worker() {}\nfn other() { 1 }\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_stdout_ends_quietly() {
+    use std::io::Read;
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("in.txt");
+    std::fs::write(&input, "show src/lib.rs\n".repeat(5_000)).unwrap();
+    let mut child = bin()
+        .arg("run")
+        .stdin(std::fs::File::open(&input).unwrap())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"))
+        .spawn()
+        .unwrap();
+    // Read a little, then close the pipe as `| head -1` does while output is still pending.
+    let mut first = [0; 16];
+    child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+    let status = child.wait().unwrap();
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_ne!(status.code(), Some(101), "{err}");
+    assert!(
+        !err.contains("Broken pipe") && !err.contains("panicked"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -59,7 +59,7 @@ Example (add --fmt to format the written files):
 #[command(after_long_help = SYNTAX)]
 pub struct Args {
     /// Read the patch from this file instead of stdin.
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = crate::home::<PathBuf>)]
     file: Option<PathBuf>,
     /// Validate only; write nothing.
     #[arg(long)]

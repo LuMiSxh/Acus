@@ -17,10 +17,10 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     top: usize,
     /// Claude Code projects dir (default ~/.claude/projects).
-    #[arg(long)]
+    #[arg(long, value_parser = crate::home::<PathBuf>)]
     claude_dir: Option<PathBuf>,
     /// Codex sessions dir (default ~/.codex/sessions).
-    #[arg(long)]
+    #[arg(long, value_parser = crate::home::<PathBuf>)]
     codex_dir: Option<PathBuf>,
     /// Count how agents search, read, edit and build (acus vs grep, sed, python, built-in tools).
     #[arg(long)]

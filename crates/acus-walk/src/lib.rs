@@ -95,3 +95,16 @@ pub fn display_path(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
     s.strip_prefix("./").map(str::to_owned).unwrap_or(s)
 }
+
+/// Expands a leading `~` or `~/` (`~\` on Windows) to the home directory. A shell does this for
+/// command-line words; `acus run` lines and patch text get no shell, so acus does it itself.
+pub fn expand_home(path: &str) -> String {
+    let rest = match path.strip_prefix('~') {
+        Some(r) if r.is_empty() || r.starts_with(['/', '\\']) => r,
+        _ => return path.to_owned(),
+    };
+    match std::env::home_dir() {
+        Some(home) => format!("{}{rest}", home.display()),
+        None => path.to_owned(),
+    }
+}
