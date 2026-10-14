@@ -11,11 +11,10 @@ use std::process::{Command, Stdio};
 /// The syntax `--help` shows after the options; `*** Replace All:` is the one agents miss.
 const SYNTAX: &str = "\
 PATCH FORMAT (stdin or --file; all or nothing, nothing is written on an error):
-  *** Update File: PATH         then `@@ enclosing line` anchors and ` `, `-`, `+` lines, or
-                                SEARCH/REPLACE blocks; context, `-` and SEARCH lines are WHOLE lines
+  *** Update File: PATH         then SEARCH/REPLACE blocks (below)
   *** Add File: PATH            then `+` lines
   *** Delete File: PATH
-  *** Copy File: SRC            then *** To: DST (later hunks may update DST)
+  *** Copy File: SRC            then *** To: DST (later blocks may update DST)
   *** Replace Symbol: PATH#Symbol   then the new definition as `+` lines
   *** Insert Before: PATH#Symbol    then `+` lines (above its doc comments and attributes)
   *** Insert After: PATH#Symbol     then `+` lines (below the symbol)
@@ -23,13 +22,18 @@ PATCH FORMAT (stdin or --file; all or nothing, nothing is written on an error):
   *** Delete Symbol: PATH#Symbol
   *** Move Symbol: PATH#Symbol      then *** Before: PATH#Sym, *** After: PATH#Sym or *** To: PATH
 
-  Context, `-` and SEARCH lines also match ignoring trailing whitespace and indentation if that
-  is unique; `+` lines are then re-indented to the file and a `note:` says so.
-
-  If a hunk's lines are not adjacent in the file, it is applied as separate pieces when each
-  piece (a run of context or of -/+ groups) matches uniquely, in order. A hunk of only `-` lines
-  followed by as many `+` lines replaces text inside a line when each `-` text occurs exactly
-  once in the file. Both are reported in a `note:`; otherwise the patch fails.
+  SEARCH/REPLACE under `*** Update File:`, with the Edit tool's semantics: one or more blocks
+  <<<<<<< SEARCH
+  old text, copied exactly without the line-number prefix `acus show` prints
+  =======
+  new text
+  >>>>>>> REPLACE
+  The old text is a substring, part of a line or several lines, and must occur exactly once in
+  the file. With no match the error shows the nearest lines; with several it lists their line
+  numbers, so add a neighbouring line to the block to narrow the search.
+  Blocks of one file and files of one patch apply all or nothing. If the text is not found as
+  written, acus also accepts it with line-number prefixes stripped or ignoring trailing
+  whitespace, and prints a `note:`.
 
 PART OF A LINE: *** Replace All: PATH [PATH...]
   Replaces every occurrence of a text in the files, directories (walked, .gitignore respected)
@@ -55,9 +59,11 @@ PART OF A LINE: *** Replace All: PATH [PATH...]
 Example (add --fmt to format the written files):
   acus patch <<'PATCH'
   *** Update File: src/lib.rs
-  @@ fn parse
-  -    let x = 1;
-  +    let x = 2;
+  <<<<<<< SEARCH
+      let x = 1;
+  =======
+      let x = 2;
+  >>>>>>> REPLACE
   PATCH";
 
 #[derive(clap::Args)]
@@ -109,15 +115,8 @@ pub fn run(a: Args, out: &Out, nested: bool, cfg: &Config) -> Result<Outcome> {
     }
     let mut notes: Vec<String> = Vec::new();
     for (list, what) in [
-        (&applied.tolerant, "tolerant match (whitespace/indentation)"),
-        (
-            &applied.split,
-            "split match (lines were not adjacent, applied as separate parts)",
-        ),
-        (
-            &applied.partial,
-            "partial-line match (replaced text inside a line)",
-        ),
+        (&applied.numbered, "stripped line-number prefixes"),
+        (&applied.trailing, "matched ignoring trailing whitespace"),
     ] {
         if !list.is_empty() {
             notes.push(format!("note: {what} in {}", list.join(", ")));

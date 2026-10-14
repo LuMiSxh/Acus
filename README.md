@@ -143,14 +143,16 @@ Symbols are understood for Rust, Swift, TypeScript and JavaScript, Svelte, Pytho
 
 ## Patches
 
-`acus patch` reads the Codex `apply_patch` format and adds `*** Replace Symbol:`, which swaps out a whole function or type by name:
+`acus patch` edits text the way Claude's Edit tool does. Under `*** Update File:`, a SEARCH/REPLACE block replaces one exact substring, part of a line or several lines. `*** Replace Symbol:` swaps out a whole function or type by name:
 
 ```
 *** Begin Patch
 *** Update File: src/lib.rs
-@@ fn parse
--        let x = 1;
-+        let x = 2;
+<<<<<<< SEARCH
+    let x = 1;
+=======
+    let x = 2;
+>>>>>>> REPLACE
 *** Replace Symbol: src/lib.rs#Parser::reset
 +    fn reset(&mut self) {
 +        self.pos = 0;
@@ -161,19 +163,11 @@ Symbols are understood for Rust, Swift, TypeScript and JavaScript, Svelte, Pytho
 *** End Patch
 ```
 
-Context lines are matched exactly first, then without trailing whitespace, then without any surrounding whitespace. An `@@` anchor can be any part of a line, and the context may start on the anchor line itself. If a hunk matches in more than one place, the patch is refused and the error lists the candidate lines.
-
-Only when those fail are two fallbacks tried, each reported in a `note:`. A hunk whose lines are not adjacent is split between its `-`/`+` groups and applied as separate pieces if every piece matches uniquely, in order. A hunk of only `-` lines followed by as many `+` lines replaces text inside a line when each `-` text occurs exactly once in the file (after the `@@` anchor). Anything else still fails and applies nothing.
+The old text must occur exactly once in the file. With no match the error shows the nearest lines; with several it lists their line numbers, so add a neighbouring line to the block to narrow the search. Several blocks per file and several files per patch apply all or nothing. If the text is not found as written, acus also accepts it with `acus show` line-number prefixes stripped or ignoring trailing whitespace, and prints a `note:`.
 
 Agents that would otherwise write a `sed -i` line or a small Python script get a few more directives:
 
 ```
-*** Update File: src/lib.rs
-<<<<<<< SEARCH
-    let x = 1;
-=======
-    let x = 2;
->>>>>>> REPLACE
 *** Replace All: src *.py
 <<<<<<< SEARCH
 old_name(
@@ -194,10 +188,9 @@ fn ${1}_new(
 *** To: src/lib_copy.rs
 ```
 
-SEARCH/REPLACE blocks are the format Aider made popular and can stand in for `-`/`+` lines inside any `Update File`. `*** Replace All: PATH [PATH...]` changes every occurrence, also part of a line, in the space-separated files, directories and globs after it (a glob such as `*.py` matches below the current directory), and fails if a block matches nowhere. A block is `<<<<<<< SEARCH` (literal, whitespace-exact, may span lines) or `<<<<<<< REGEX` (a Rust regex run per file with `(?m)`; `${1}` in the replacement). `-` and SEARCH lines inside `Update File` match whole lines, and a failed hunk that holds only part of a line says to use `Replace All`; `acus patch --help` shows the syntax. `*** Insert Before:` and `*** Insert After:` take `path#Symbol` (or `path:N`) and put the `+` lines above the symbol's doc comments and attributes, or below the symbol. `*** Copy File: SRC` with `*** To: DST` copies a file and fails if DST exists. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
+SEARCH/REPLACE is the format Aider made popular. `*** Replace All: PATH [PATH...]` changes every occurrence, also part of a line, in the space-separated files, directories and globs after it (a glob such as `*.py` matches below the current directory), and fails if a block matches nowhere. A block is `<<<<<<< SEARCH` (literal, whitespace-exact, may span lines) or `<<<<<<< REGEX` (a Rust regex run per file with `(?m)`; `${1}` in the replacement). `acus patch --help` shows the syntax. `*** Insert Before:` and `*** Insert After:` take `path#Symbol` (or `path:N`) and put the `+` lines above the symbol's doc comments and attributes, or below the symbol. `*** Copy File: SRC` with `*** To: DST` copies a file and fails if DST exists. `Delete Symbol` and `Move Symbol` carry doc comments and attributes along; a move goes `*** Before:` or `*** After:` another symbol, or `*** To:` the end of a file, which is created if needed.
 
-Nothing is written unless every hunk applies. Files are replaced atomically. `--check` only validates. `--fmt` (or `[patch] fmt = true`) runs each written file through its formatter if one is installed (rustfmt with the crate's edition, ruff or black, the project's prettier, swift-format, gofmt) and prints the formatted lines, so line numbers and context stay true for the next patch.
-
+Nothing is written unless every block applies. Files are replaced atomically. `--check` only validates. `--fmt` (or `[patch] fmt = true`) runs each written file through its formatter if one is installed (rustfmt with the crate's edition, ruff or black, the project's prettier, swift-format, gofmt) and prints the formatted lines, so line numbers and context stay true for the next patch.
 ## Numbers
 
 Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on an Apple M4. The small corpus is tokio (564 files), the large one a full Cargo registry (80,197 files, 1.8 GB).

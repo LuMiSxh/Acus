@@ -1,17 +1,69 @@
 use crate::Outcome;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The skill shipped with this binary, so hook output and installed copies match its version.
 const SKILL: &str = include_str!("../../../skill/SKILL.md");
+/// Skill directories under the home dir: Claude Code reads the first, Codex the second.
+const CLAUDE_DIR: &str = ".claude/skills/acus";
+const CODEX_DIR: &str = ".agents/skills/acus";
+
+/// The agent whose skill directory `--install` writes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Agent {
+    /// ~/.claude/skills/acus/ (default).
+    Claude,
+    /// ~/.agents/skills/acus/, which Codex reads.
+    Codex,
+    /// Both skill directories.
+    All,
+}
+
+impl Agent {
+    /// The `--agent` value for this agent.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+            Agent::All => "all",
+        }
+    }
+
+    /// Skill directories written for this agent, under `home`.
+    fn dirs(self, home: &Path) -> Vec<PathBuf> {
+        let claude = home.join(CLAUDE_DIR);
+        let codex = home.join(CODEX_DIR);
+        match self {
+            Agent::Claude => vec![claude],
+            Agent::Codex => vec![codex],
+            Agent::All => vec![claude, codex],
+        }
+    }
+}
+
+/// The agent whose skill is already installed under `home`, so an update reinstalls it there;
+/// claude when neither skill directory exists.
+pub fn installed_agent(home: &Path) -> Agent {
+    match (
+        home.join(CLAUDE_DIR).is_dir(),
+        home.join(CODEX_DIR).is_dir(),
+    ) {
+        (true, true) => Agent::All,
+        (false, true) => Agent::Codex,
+        _ => Agent::Claude,
+    }
+}
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Write SKILL.md to ~/.claude/skills/acus/ and ~/.agents/skills/acus/ instead of printing it.
+    /// Write SKILL.md to the skill directory of --agent instead of printing it.
     #[arg(long)]
     install: bool,
-    /// With --install: also register the SessionStart and PreToolUse hooks in ~/.claude/settings.json.
+    /// With --install: which agent's skill directory to write.
+    #[arg(long, value_enum, default_value_t = Agent::Claude, requires = "install")]
+    agent: Agent,
+    /// With --install and --agent claude or all: also register the SessionStart and PreToolUse hooks in ~/.claude/settings.json.
     #[arg(long, requires = "install")]
     hooks: bool,
 }
@@ -22,18 +74,26 @@ pub fn run(a: Args) -> Result<Outcome> {
         return Ok(Outcome::Found);
     }
     let home = std::env::home_dir().context("no home directory")?;
-    for dir in [".claude/skills/acus", ".agents/skills/acus"] {
-        let dir = home.join(dir);
+    install(&home, a.agent, a.hooks)?;
+    Ok(Outcome::Found)
+}
+
+/// Writes the skill for `agent` under `home`, and the Claude hooks when `hooks` is set.
+fn install(home: &Path, agent: Agent, hooks: bool) -> Result<()> {
+    if hooks && agent == Agent::Codex {
+        bail!("--hooks registers Claude Code hooks\nhint: use --agent claude or --agent all");
+    }
+    for dir in agent.dirs(home) {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("cannot create {}", dir.display()))?;
         let file = dir.join("SKILL.md");
         std::fs::write(&file, SKILL).with_context(|| format!("cannot write {}", file.display()))?;
         println!("{}", file.display());
     }
-    if a.hooks {
+    if hooks {
         install_hooks(&home.join(".claude/settings.json"))?;
     }
-    Ok(Outcome::Found)
+    Ok(())
 }
 
 /// Registers the acus hooks in a Claude Code settings file, keeping a `.bak` of the old one.
@@ -130,6 +190,7 @@ fn body(s: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::Agent;
     use serde_json::json;
 
     fn count(v: &serde_json::Value, event: &str) -> usize {
@@ -190,5 +251,48 @@ mod tests {
         assert_eq!(super::body("---\nname: x\n---\n\n# acus\n"), "# acus\n");
         assert_eq!(super::body("# no frontmatter\n"), "# no frontmatter\n");
         assert!(super::body(super::SKILL).starts_with("# acus"));
+    }
+
+    #[test]
+    fn install_writes_only_the_chosen_agents_dirs() {
+        for agent in [Agent::Claude, Agent::Codex, Agent::All] {
+            let t = tempfile::tempdir().unwrap();
+            super::install(t.path(), agent, false).unwrap();
+            let written = |dir: &str| t.path().join(dir).join("SKILL.md").is_file();
+            assert_eq!(
+                written(super::CLAUDE_DIR),
+                agent != Agent::Codex,
+                "{agent:?}"
+            );
+            assert_eq!(
+                written(super::CODEX_DIR),
+                agent != Agent::Claude,
+                "{agent:?}"
+            );
+            assert!(
+                !t.path().join(".claude/settings.json").exists(),
+                "{agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hooks_need_a_claude_agent() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(super::install(t.path(), Agent::Codex, true).is_err());
+        assert!(!t.path().join(super::CODEX_DIR).exists());
+        super::install(t.path(), Agent::Claude, true).unwrap();
+        assert!(t.path().join(".claude/settings.json").is_file());
+    }
+
+    #[test]
+    fn update_reinstalls_where_the_skill_is_installed() {
+        let t = tempfile::tempdir().unwrap();
+        let h = t.path();
+        assert_eq!(super::installed_agent(h), Agent::Claude);
+        std::fs::create_dir_all(h.join(super::CODEX_DIR)).unwrap();
+        assert_eq!(super::installed_agent(h), Agent::Codex);
+        std::fs::create_dir_all(h.join(super::CLAUDE_DIR)).unwrap();
+        assert_eq!(super::installed_agent(h), Agent::All);
     }
 }

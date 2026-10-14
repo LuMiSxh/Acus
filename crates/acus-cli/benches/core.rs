@@ -89,15 +89,17 @@ fn bench(c: &mut Criterion) {
     let file = root.join("m0/f0.rs");
     let patch: String = (0..ITEMS)
         .map(|i| {
-            format!("@@ impl Item{i} {{\n-        self.id * {i}\n+        self.id * {i} + 1\n")
+            format!(
+                "<<<<<<< SEARCH\nfn checksum_0_{i}(&self) -> u64 {{\n        // TODO tune\n        self.id * {i}\n=======\nfn checksum_0_{i}(&self) -> u64 {{\n        // TODO tune\n        self.id * {i} + 1\n>>>>>>> REPLACE\n"
+            )
         })
         .collect();
     let patch = format!("*** Begin Patch\n*** Update File: m0/f0.rs\n{patch}*** End Patch\n");
-    c.bench_function("patch 40 hunks, check only", |b| {
+    c.bench_function("patch 40 blocks, check only", |b| {
         b.iter(|| acus_edit::apply(&acus_edit::parse(&patch).unwrap(), root, true).unwrap())
     });
     let original = std::fs::read_to_string(&file).unwrap();
-    c.bench_function("patch 40 hunks, atomic write", |b| {
+    c.bench_function("patch 40 blocks, atomic write", |b| {
         b.iter(|| {
             std::fs::write(&file, &original).unwrap();
             acus_edit::apply(&acus_edit::parse(&patch).unwrap(), root, false).unwrap()

@@ -22,6 +22,7 @@ pub use imp::run;
 mod imp {
     use super::Args;
     use crate::Outcome;
+    use crate::cmd_skill::{Agent, installed_agent};
     use anyhow::{Context, Result, bail};
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -77,9 +78,10 @@ mod imp {
         } else {
             println!("acus {current} is current ({})", exe.display());
         }
-        // The binary on disk carries the skill of its version.
+        // The binary on disk carries the skill of its version; reinstall it where it already is.
+        let agent = std::env::home_dir().map_or(Agent::Claude, |h| installed_agent(&h));
         let ok = Command::new(&exe)
-            .args(["skill", "--install"])
+            .args(["skill", "--install", "--agent", agent.flag()])
             .status()
             .is_ok_and(|s| s.success());
         if !ok {

@@ -35,18 +35,22 @@ EOF
 
 ## Patch
 
-Codex `apply_patch` format; `@@` takes the start of an enclosing line. No prior Read needed. Put every change of one step into one patch.
+Edit with `acus patch`, with the semantics of Claude's Edit tool. No prior Read needed. Put every change of one step into one patch.
 
 ```bash
 acus patch --fmt <<'PATCH'
 *** Begin Patch
 *** Update File: src/lib.rs
-@@ fn parse
--        let x = 1;
-+        let x = 2;
-@@ fn finish
--        self.done = false;
-+        self.done = true;
+<<<<<<< SEARCH
+        let x = 1;
+=======
+        let x = 2;
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+self.done = false;
+=======
+self.done = true;
+>>>>>>> REPLACE
 *** Replace Symbol: src/lib.rs#Parser::reset
 +    fn reset(&mut self) {
 +        self.pos = 0;
@@ -58,12 +62,12 @@ acus patch --fmt <<'PATCH'
 PATCH
 ```
 
-Hunk rules:
-- A hunk is one contiguous block of the file. Edits at separate places get separate hunks, each with its own `@@` anchor, as in `fn parse` and `fn finish` above.
-- Context and `-` lines are whole lines copied exactly, without the line-number prefix `acus show` prints. To change part of a line, use `*** Replace All:` (below).
-- acus still applies some near misses (whitespace drift, non-adjacent lines in one hunk, a unique part of a line) and then prints a `note:`; check the written lines it shows.
+Rules for SEARCH/REPLACE blocks under `*** Update File:`:
+- Copy the old text exactly, without the line-number prefix `acus show` prints. It is a substring: it may be part of a line or span lines. If it is not found as written, acus also accepts it with those prefixes stripped or ignoring trailing whitespace, and prints a `note:`.
+- It must occur exactly once. With no match the error shows the nearest lines; with several it lists their line numbers. Add a neighbouring line to make it unique.
+- For every occurrence, across files, or with a regex, use `*** Replace All:` (below).
 
-Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written, and the error shows the nearest matching lines; fix that hunk from them and resend the whole patch. `--check` validates without writing. `--fmt` runs the file's formatter (rustfmt, ruff/black, prettier, swift-format, gofmt) and prints the formatted lines, so the next patch's context still matches. Pick a heredoc delimiter that no line of the patch equals (`PATCH`, or `ACUS_END` when editing docs or scripts). Symbols may be written `Class.method` too.
+Output lists the written lines with their new numbers, so no re-read is needed. All or nothing: on error nothing was written; fix the block from the lines shown and resend the whole patch. `--check` validates without writing. `--fmt` runs the file's formatter (rustfmt, ruff/black, prettier, swift-format, gofmt) and prints the formatted lines, so the next patch's context still matches. Pick a heredoc delimiter that no line of the patch equals (`PATCH`, or `ACUS_END` when editing docs or scripts). Symbols may be written `Class.method` too.
 
 More directives, mixable with the above in one patch (`acus patch --help` has the full syntax):
 
@@ -89,7 +93,6 @@ fn ${1}_new(
 ```
 
 - `*** Replace All: PATH [PATH...]` takes space-separated files, directories and globs (`*.py`, matched below the current directory) and changes every occurrence. SEARCH blocks are literal and whitespace-exact and may span lines; REGEX blocks are Rust regex run per file with `(?m)`, with `${1}` in the replacement. A block that matches nothing fails the patch.
-- `*** Update File:` also accepts SEARCH blocks, matched as whole lines.
 - `Delete Symbol` and `Move Symbol` take doc comments and attributes along; `Move Symbol` needs `*** Before:` or `*** After: path#Sym`, or `*** To: path`.
 
 ## Reading the output
