@@ -2032,7 +2032,10 @@ mod tests {
         }
         // A read next to a build pipe is rewritten too, and the whole command is deferred.
         let r = rewrite("cat a.rs; cargo test | tail -3", None).unwrap();
-        assert_eq!(r.command, "acus show 'a.rs'; acus ctx 'cargo test' --tail 3");
+        assert_eq!(
+            r.command,
+            "acus show 'a.rs'; acus ctx 'cargo test' --tail 3"
+        );
         assert!(r.deferred);
         // A filter ctx has no flag for stays refused.
         assert_eq!(rw("cargo test | tail -n +5"), None);

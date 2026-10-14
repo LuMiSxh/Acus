@@ -896,7 +896,11 @@ fn split_hunk(lines: &[String], c: &Chunk, path: &str) -> Option<Vec<Splice>> {
                 })
                 .collect();
             let piece = Chunk {
-                anchors: if pieces == 0 { c.anchors.clone() } else { vec![] },
+                anchors: if pieces == 0 {
+                    c.anchors.clone()
+                } else {
+                    vec![]
+                },
                 old,
                 new,
                 eof: c.eof && e == atoms.len(),
@@ -934,11 +938,23 @@ fn partial_lines(lines: &[String], c: &Chunk) -> Option<Vec<Splice>> {
     let dels: Vec<&str> = c
         .steps
         .iter()
-        .map_while(|s| if let Step::Del(l) = s { Some(l.as_str()) } else { None })
+        .map_while(|s| {
+            if let Step::Del(l) = s {
+                Some(l.as_str())
+            } else {
+                None
+            }
+        })
         .collect();
     let adds: Vec<&str> = c.steps[dels.len()..]
         .iter()
-        .map_while(|s| if let Step::Add(l) = s { Some(l.as_str()) } else { None })
+        .map_while(|s| {
+            if let Step::Add(l) = s {
+                Some(l.as_str())
+            } else {
+                None
+            }
+        })
         .collect();
     if dels.is_empty() || dels.len() != adds.len() || dels.len() + adds.len() != c.steps.len() {
         return None;

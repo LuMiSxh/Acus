@@ -242,7 +242,8 @@ fn partial_lines_are_replaced_when_unique() {
         "r.md",
         "# T\n**[Guide](crates/c/README.md)** · [Changelog](crates/c/CHANGELOG.md)\nend\n",
     )]);
-    let p = "*** Update File: r.md\n-[Changelog](crates/c/CHANGELOG.md)\n+[Changelog](CHANGELOG.md)\n";
+    let p =
+        "*** Update File: r.md\n-[Changelog](crates/c/CHANGELOG.md)\n+[Changelog](CHANGELOG.md)\n";
     let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
     assert_eq!(
         read(d.path(), "r.md"),

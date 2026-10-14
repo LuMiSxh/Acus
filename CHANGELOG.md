@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0]
+
+### Added
+
+- `acus patch` falls back to two more matches after exact and whitespace-tolerant matching fail, and prints a `note:` for each: a hunk whose lines are not adjacent in the file is split between its `-`/`+` groups and applied as separate parts when every part matches once, in order; and a hunk of k `-` lines followed by k `+` lines whose `-` texts each occur once inside a line replaces that text in place.
+- Paths starting with `~` are expanded to the home directory in every command's path arguments, in `acus run` lines and in patch file paths.
+
+### Changed
+
+- `acus guard` rewrites a Bash command instead of refusing it when every offending segment has an exact acus replacement: reads (`cat`, `head -n`, `sed -n`, `grep`, `rg`) run as `acus show`/`acus find` with `permissionDecision: allow`; build pipes (`CMD | tail/head/grep`) run as `acus ctx` and go through the normal permission flow. The agent is told what ran through `additionalContext`. Codex hook calls keep the refusals. `acus usage --guard` counts rewrites separately.
+- The skill leads with an "Instead of … run" table and adds batching advice and hunk rules.
+
 ## [0.10.0]
 
 ### Added
