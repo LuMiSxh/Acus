@@ -18,6 +18,7 @@ mod fmt;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fmt::Format;
+use std::convert::Infallible;
 use std::process::ExitCode;
 
 /// Agent-first code search, outline and editing. Exit: 0 results, 1 nothing found, 2 error.
@@ -147,6 +148,11 @@ pub fn execute(cli: Cli, nested: bool) -> Result<Outcome> {
         println!("null");
     }
     Ok(result)
+}
+
+/// Clap value parser for path arguments: `~` and `~/…` become $HOME, as a shell would expand them.
+pub fn home<T: From<String>>(arg: &str) -> Result<T, Infallible> {
+    Ok(T::from(acus_walk::expand_home(arg)))
 }
 
 /// A hint for a grep or rg flag that `acus find` lacks, printed after clap's own error; `args`

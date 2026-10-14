@@ -23,6 +23,27 @@ pub fn run(_: Args, cfg: &Config) -> Result<Outcome> {
     let cwd = v["cwd"].as_str();
     let command = input["command"].as_str().unwrap_or_default();
     let scope = Scope::new(cwd);
+    // Codex hooks (they carry a `turn_id`) cannot rewrite a call, only refuse it.
+    let rewritten = (v["tool_name"].as_str() == Some("Bash") && v.get("turn_id").is_none())
+        .then(|| rewrite(command, scope.as_ref()))
+        .flatten();
+    if let Some(rw) = rewritten {
+        log(cfg, &v, &Verdict::Rewrite(rw.rule));
+        let mut updated = input.clone();
+        updated["command"] = rw.command.into();
+        let mut hook = serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "updatedInput": updated,
+            // No permissionDecisionReason: an allow reason would reach only the user, not the agent.
+            "additionalContext": rw.note,
+        });
+        // A build is left undecided, so Claude Code's permission flow decides on the rewritten command.
+        if !rw.deferred {
+            hook["permissionDecision"] = "allow".into();
+        }
+        println!("{}", serde_json::json!({ "hookSpecificOutput": hook }));
+        return Ok(Outcome::Found);
+    }
     let verdict = match v["tool_name"].as_str() {
         Some("Read") => read_check(input, cwd, scope.as_ref()),
         Some("Grep") => grep_tool(input, cwd),
@@ -46,6 +67,7 @@ pub fn run(_: Args, cfg: &Config) -> Result<Outcome> {
             "additionalContext": hint,
         }}),
         Verdict::Escape(_) => return Ok(Outcome::Found),
+        Verdict::Rewrite(_) => return Ok(Outcome::Found),
     };
     println!("{out}");
     Ok(Outcome::Found)
@@ -102,12 +124,17 @@ enum Verdict {
     Hint(&'static str, String),
     /// A call the rule would refuse, run anyway through the escape; only logged.
     Escape(&'static str),
+    /// A call run in its rewritten form; only logged (`run` answers it).
+    Rewrite(&'static str),
 }
 
 impl Verdict {
     fn rule(&self) -> &'static str {
         match self {
-            Verdict::Deny(r, _) | Verdict::Hint(r, _) | Verdict::Escape(r) => r,
+            Verdict::Deny(r, _)
+            | Verdict::Hint(r, _)
+            | Verdict::Escape(r)
+            | Verdict::Rewrite(r) => r,
         }
     }
 
@@ -116,6 +143,7 @@ impl Verdict {
             Verdict::Deny(..) => "deny",
             Verdict::Hint(..) => "hint",
             Verdict::Escape(_) => "escape",
+            Verdict::Rewrite(_) => "rewrite",
         }
     }
 
@@ -281,7 +309,7 @@ fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
         cmd += &format!(" -g {}", quote(g));
     }
     if let Some(t) = input["type"].as_str() {
-        cmd += &format!(" -t {t}");
+        cmd += &format!(" -t {}", quote(t));
     }
     if input["-i"].as_bool() == Some(true) {
         cmd += " -i";
@@ -458,7 +486,7 @@ fn check_in(cmd: &str, ps: bool, scope: Option<&Scope>) -> Option<Verdict> {
         .min_by_key(|(v, ..)| match v {
             Verdict::Deny(..) => 0,
             Verdict::Hint(..) => 1,
-            Verdict::Escape(_) => 2,
+            Verdict::Escape(_) | Verdict::Rewrite(_) => 2,
         })?;
     let compound = segs.iter().filter(|(s, _)| !s.trim().is_empty()).count() > 1;
     let v = match v {
@@ -1000,7 +1028,7 @@ fn parse_search<'a>(head: &str, args: &[&'a str]) -> Search<'a> {
                             s.flags.push(if c == 'g' {
                                 format!("-g {}", quote(unquote(v)))
                             } else {
-                                format!("-t {}", unquote(v))
+                                format!("-t {}", quote(unquote(v)))
                             });
                         }
                         break;
@@ -1220,7 +1248,8 @@ fn show_cmd(head: &str, args: &[&str]) -> Option<String> {
     }
     files.dedup();
     let [file] = files.as_slice() else {
-        return (!files.is_empty()).then(|| format!("`acus show {}`", files.join(" ")));
+        let quoted: Vec<String> = files.iter().map(|f| quote(f)).collect();
+        return (!files.is_empty()).then(|| format!("`acus show {}`", quoted.join(" ")));
     };
     let range = range.or(first.map(|n| (1, n)));
     Some(match range {
@@ -1386,23 +1415,204 @@ fn strip_heredocs(cmd: &str) -> (String, Vec<(String, String)>) {
     (out, docs)
 }
 
+/// A Bash command the guard would refuse, rewritten into the acus call that does the same.
+struct Rewrite {
+    command: String,
+    /// What was run instead of what, for the agent.
+    note: String,
+    rule: &'static str,
+    /// A build or test was rewritten, so the hook gives no permission decision.
+    deferred: bool,
+}
+
+/// Rewrites every segment the guard would refuse, when each has an exact acus replacement;
+/// `None` (refuse as usual) if any segment has none. A rewritten build is `deferred`: the
+/// permission flow decides on it, as it does for a build the agent runs itself.
+fn rewrite(cmd: &str, scope: Option<&Scope>) -> Option<Rewrite> {
+    if ["<<", "$(", "`", "acus-skip"]
+        .iter()
+        .any(|m| cmd.contains(m))
+    {
+        return None;
+    }
+    let spans = spans(cmd, false);
+    let segs: Vec<(String, bool)> = spans
+        .iter()
+        .map(|&(a, b, piped)| (cmd[a..b].to_owned(), piped))
+        .collect();
+    let (mut out, mut at, mut i) = (String::new(), 0, 0);
+    let (mut notes, mut first, mut deferred) = (Vec::new(), None, false);
+    while i < segs.len() {
+        let (seg, piped) = &segs[i];
+        let (escaped, plain) = unescape(seg);
+        if escaped {
+            i += 1;
+            continue;
+        }
+        let pair = segs
+            .get(i + 1)
+            .and_then(|next| filtered_build(plain, next, plain, &next.0));
+        let (last, kind, new) = match pair {
+            Some(Verdict::Deny("build-pipe", _)) => {
+                (i + 1, "build-pipe", rewrite_build(plain, &segs[i + 1].0)?)
+            }
+            Some(Verdict::Deny(..)) => return None,
+            _ => match rule(plain, *piped, false, scope) {
+                Some(Verdict::Deny(name @ ("grep" | "read-shell"), _)) => {
+                    (i, name, rewrite_read(name, plain)?)
+                }
+                Some(Verdict::Deny(..)) => return None,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            },
+        };
+        let from = spans[i].0 + (seg.len() - seg.trim_start().len());
+        let to = spans[last].1 - (segs[last].0.len() - segs[last].0.trim_end().len());
+        let old = one_line(&cmd[from..to]);
+        notes.push(format!("ran `{new}` instead of `{old}`"));
+        out.push_str(&cmd[at..from]);
+        out.push_str(&new);
+        deferred |= kind == "build-pipe";
+        (at, i, first) = (to, last + 1, first.or(Some(kind)));
+    }
+    out.push_str(&cmd[at..]);
+    // The result must pass the guard itself.
+    if matches!(check_in(&out, false, scope), Some(Verdict::Deny(..))) {
+        return None;
+    }
+    Some(Rewrite {
+        command: out,
+        note: format!(
+            "acus guard: {}. The command was rewritten, not refused; use acus directly next time.",
+            notes.join("; ")
+        ),
+        rule: first?,
+        deferred,
+    })
+}
+
+/// `acus ctx 'BUILD' --tail N` for `BUILD | tail -N` and the other filters `ctx_flag` knows.
+fn rewrite_build(build: &str, filter: &str) -> Option<String> {
+    let build = build.trim().trim_end_matches("2>&1").trim_end();
+    if build.contains(['\'', '<', '>']) || filter.contains(['<', '>']) {
+        return None;
+    }
+    let (name, args) = head(filter)?;
+    let (flag, _) = ctx_flag(&name.to_lowercase(), &args.collect::<Vec<_>>())?;
+    Some(format!("acus ctx '{build}' {flag}"))
+}
+
+/// The `acus show` or `acus find` call that does what a `cat`, `head -n N`, `sed -n A,Bp` or
+/// `grep` of the segment did; `None` where the replacement would not be the same read.
+fn rewrite_read(rule: &str, seg: &str) -> Option<String> {
+    if seg.contains(['<', '>', '$']) || has_glob(seg) {
+        return None;
+    }
+    let seg = expand_home(seg)?;
+    let words = split_words(&seg);
+    let (&first, args) = words.split_first()?;
+    if !matches!(first, "cat" | "head" | "sed" | "grep" | "egrep" | "rg") {
+        return None;
+    }
+    let file = |a: &str| is_code_path(unquote(a)) && !a.contains(',') && !a.starts_with('-');
+    let ok = match (rule, first) {
+        ("grep", _) => true,
+        ("read-shell", "cat") => !args.is_empty() && args.iter().all(|a| file(a)),
+        ("read-shell", "head") => match args {
+            [n, f] => {
+                file(f)
+                    && n.trim_start_matches("-n")
+                        .trim_start_matches('-')
+                        .parse::<usize>()
+                        .is_ok()
+            }
+            ["-n", n, f] => file(f) && n.parse::<usize>().is_ok(),
+            _ => false,
+        },
+        ("read-shell", "sed") => match args {
+            ["-n", range, f] => {
+                file(f)
+                    && unquote(range).strip_suffix('p').is_some_and(|r| {
+                        r.split(',').count() <= 2
+                            && r.split(',').all(|x| x.parse::<usize>().is_ok())
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    ok.then(|| suggest(rule, &seg))
+        .flatten()
+        .map(|s| s.trim_matches('`').to_owned())
+}
+
+/// Unquoted wildcards would expand differently once the words are quoted.
+fn has_glob(seg: &str) -> bool {
+    let mut quote = None;
+    seg.chars().any(|c| match (quote, c) {
+        (Some(q), _) => {
+            if c == q {
+                quote = None;
+            }
+            false
+        }
+        (None, '\'' | '"') => {
+            quote = Some(c);
+            false
+        }
+        (None, c) => matches!(c, '*' | '?' | '[' | '{'),
+    })
+}
+
+/// A leading `~` becomes `$HOME`, since quoting the path would stop the shell expanding it.
+fn expand_home(seg: &str) -> Option<String> {
+    static TILDE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(^|[\s'"=,:])~(/|$|[\s'"])"#).unwrap());
+    if !seg.contains('~') {
+        return Some(seg.to_owned());
+    }
+    let home = std::env::var("HOME").ok()?;
+    if home.is_empty() || home.contains([' ', '\'', '"']) {
+        return None;
+    }
+    let out = TILDE.replace_all(seg, |c: &regex::Captures| {
+        format!("{}{home}{}", &c[1], &c[2])
+    });
+    (!TILDE.is_match(&out) && !out.contains("~")).then(|| out.into_owned())
+}
+
 /// Simple commands outside quotes, each with whether it reads a pipe.
 fn segments(cmd: &str, ps: bool) -> Vec<(String, bool)> {
+    spans(cmd, ps)
+        .into_iter()
+        .map(|(a, b, piped)| (cmd[a..b].to_owned(), piped))
+        .collect()
+}
+
+/// `segments` as byte ranges of `cmd`, so a segment can be replaced in place.
+fn spans(cmd: &str, ps: bool) -> Vec<(usize, usize, bool)> {
     let mut out = Vec::new();
-    let (mut cur, mut piped) = (String::new(), false);
+    let (mut cur, mut piped, mut start) = (String::new(), false, 0);
     let mut quote = None;
-    let mut chars = cmd.chars().peekable();
-    let mut cut = |cur: &mut String, piped: bool| out.push((std::mem::take(cur), piped));
-    while let Some(c) = chars.next() {
+    let mut chars = cmd.char_indices().peekable();
+    let mut cut = |cur: &mut String, piped: bool, start: &mut usize, next: usize| {
+        out.push((*start, *start + cur.len(), piped));
+        cur.clear();
+        *start = next;
+    };
+    while let Some((at, c)) = chars.next() {
+        let after = at + c.len_utf8();
         match (quote, c) {
             // Inside double quotes an escaped quote does not end the string.
             (Some('"'), '\\') if !ps => {
                 cur.push(c);
-                cur.extend(chars.next());
+                cur.extend(chars.next().map(|p| p.1));
             }
             (Some('"'), '`') if ps => {
                 cur.push(c);
-                cur.extend(chars.next());
+                cur.extend(chars.next().map(|p| p.1));
             }
             (Some(q), _) => {
                 if c == q {
@@ -1417,28 +1627,32 @@ fn segments(cmd: &str, ps: bool) -> Vec<(String, bool)> {
             // Backslash is a path separator in PowerShell, whose escape is the backtick.
             (None, '\\') if !ps => {
                 cur.push(c);
-                cur.extend(chars.next());
+                cur.extend(chars.next().map(|p| p.1));
             }
             (None, '`') if ps => {
                 cur.push(c);
-                cur.extend(chars.next());
+                cur.extend(chars.next().map(|p| p.1));
             }
-            (None, '&') if cur.ends_with('>') || chars.peek() == Some(&'>') => cur.push(c),
-            (None, '|') if chars.peek() != Some(&'|') => {
-                cut(&mut cur, piped);
+            (None, '&') if cur.ends_with('>') || chars.peek().map(|p| p.1) == Some('>') => {
+                cur.push(c)
+            }
+            (None, '|') if chars.peek().map(|p| p.1) != Some('|') => {
+                cut(&mut cur, piped, &mut start, after);
                 piped = true;
             }
             (None, ';' | '\n' | '(' | ')' | '`' | '&' | '|') => {
-                if matches!(c, '&' | '|') {
-                    chars.next_if_eq(&c);
-                }
-                cut(&mut cur, piped);
+                let next = if matches!(c, '&' | '|') {
+                    chars.next_if(|p| p.1 == c).map_or(after, |p| p.0 + 1)
+                } else {
+                    after
+                };
+                cut(&mut cur, piped, &mut start, next);
                 piped = false;
             }
             _ => cur.push(c),
         }
     }
-    cut(&mut cur, piped);
+    cut(&mut cur, piped, &mut start, cmd.len());
     out
 }
 
@@ -1481,7 +1695,7 @@ mod tests {
         let (_, r) = deny(check("cd a && sed -n '10,20p' src/a.rs"));
         assert!(r.contains("`acus show 'src/a.rs:10-20'`"), "{r}");
         let (_, r) = deny(check("true && cat a.rs b.rs"));
-        assert!(r.contains("`acus show a.rs b.rs`"), "{r}");
+        assert!(r.contains("`acus show 'a.rs' 'b.rs'`"), "{r}");
         let (_, r) = deny(check("cd x && sed -i 's/a/b/' a.rs b.rs"));
         assert!(r.contains("`*** Replace All: a.rs b.rs`"), "{r}");
         let (_, r) = deny(check("cd x && rg -n --glob '*.rs' -w foo"));
@@ -1752,11 +1966,81 @@ mod tests {
 
     use super::{
         READ_MAX, Scope, Verdict, check, check_in, check_ps, check_ps_in, grep_tool, read_check,
-        read_verdict,
+        read_verdict, rewrite,
     };
     use acus_syntax::Lang;
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn rewrites_reads_and_searches_into_acus_calls() {
+        let rw = |cmd: &str| rewrite(cmd, None).map(|r| r.command);
+        let cases = [
+            ("cat src/a.rs", "acus show 'src/a.rs'"),
+            ("head -n 40 src/a.rs", "acus show 'src/a.rs:1-40'"),
+            ("sed -n 1,40p src/a.rs", "acus show 'src/a.rs:1-40'"),
+            ("grep -rn foo src", "acus find 'foo' 'src'"),
+            (
+                "cd app && cat a.rs; ls | wc -l",
+                "cd app && acus show 'a.rs'; ls | wc -l",
+            ),
+        ];
+        for (cmd, want) in cases {
+            assert_eq!(rw(cmd).as_deref(), Some(want), "{cmd}");
+        }
+        let r = rewrite("sed -n 1,40p a.rs", None).unwrap();
+        assert!(!r.deferred);
+        assert_eq!(
+            r.note,
+            "acus guard: ran `acus show 'a.rs:1-40'` instead of `sed -n 1,40p a.rs`. The command was rewritten, not refused; use acus directly next time."
+        );
+        // `~` stays expandable, as an absolute path.
+        if let Ok(home) = std::env::var("HOME") {
+            let r = rw("cat ~/x/a.rs").unwrap();
+            assert_eq!(r, format!("acus show '{home}/x/a.rs'"));
+        }
+        // No exact replacement: one such segment keeps the whole command refused.
+        for cmd in [
+            "tail -30 src/a.rs",
+            "head src/a.rs",
+            "cat -n src/a.rs",
+            "sed -i 's/a/b/' a.rs",
+            "perl -pi -e 's/a/b/' lib.py",
+            "cat src/*.rs",
+            "cat a.rs && sed -i 's/a/b/' b.rs",
+            "cat a.rs && tail -5 b.rs",
+        ] {
+            assert!(rw(cmd).is_none(), "{cmd}");
+            assert!(matches!(check(cmd), Some(Verdict::Deny(..))), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn rewrites_build_pipes_into_deferred_acus_calls() {
+        let rw = |cmd: &str| rewrite(cmd, None).map(|r| r.command);
+        for (cmd, want) in [
+            (
+                "cargo test 2>&1 | tail -3",
+                "acus ctx 'cargo test' --tail 3",
+            ),
+            (
+                "cd app && swift build | grep error && echo ok",
+                "cd app && acus ctx 'swift build' --grep 'error' && echo ok",
+            ),
+        ] {
+            assert_eq!(rw(cmd).as_deref(), Some(want), "{cmd}");
+            assert!(rewrite(cmd, None).unwrap().deferred, "{cmd}");
+        }
+        // A read next to a build pipe is rewritten too, and the whole command is deferred.
+        let r = rewrite("cat a.rs; cargo test | tail -3", None).unwrap();
+        assert_eq!(
+            r.command,
+            "acus show 'a.rs'; acus ctx 'cargo test' --tail 3"
+        );
+        assert!(r.deferred);
+        // A filter ctx has no flag for stays refused.
+        assert_eq!(rw("cargo test | tail -n +5"), None);
+    }
 
     #[test]
     fn refuses_file_searches_reads_and_in_place_edits() {
@@ -1942,7 +2226,7 @@ mod tests {
             json!({"pattern": "fn main", "path": "/repo/src", "output_mode": "content", "-C": 3, "type": "rust"}),
         );
         assert!(
-            r.contains("`acus find 'fn main' 'src' -t rust --block`"),
+            r.contains("`acus find 'fn main' 'src' -t 'rust' --block`"),
             "{r}"
         );
         let r = deny(json!({"pattern": "it's", "path": "/repo", "glob": "*.md"}));

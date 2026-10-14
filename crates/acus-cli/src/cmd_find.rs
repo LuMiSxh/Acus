@@ -134,7 +134,9 @@ pub fn run(a: Args, out: &Out) -> Result<Outcome> {
     let opts = FindOpts {
         patterns,
         walk: WalkOpts {
-            roots: positional.map(Into::into).collect(),
+            roots: positional
+                .map(|p| acus_walk::expand_home(&p).into())
+                .collect(),
             include,
             // A trailing `/` ("!node_modules/") names a directory; globs match the bare name.
             exclude: exclude

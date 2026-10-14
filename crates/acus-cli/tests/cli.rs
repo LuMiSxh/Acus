@@ -292,9 +292,19 @@ fn show_json() {
 }
 
 fn acus_in(dir: &std::path::Path, args: &[&str], stdin: &str) -> (i32, String, String) {
+    acus_in_env(dir, args, stdin, &[])
+}
+
+fn acus_in_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    stdin: &str,
+    env: &[(&str, &str)],
+) -> (i32, String, String) {
     use std::io::Write;
     let mut child = bin()
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -363,6 +373,74 @@ fn patch_reports_tolerant_matches_and_new_directives() {
     );
     assert_eq!(code, 2);
     assert!(err.contains("hunk 1: context not found"), "{err}");
+}
+
+#[test]
+fn tilde_paths_expand_to_home() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::write(h.join("w.rs"), "fn worker() {}\nfn other() {}\n").unwrap();
+    // `std::env::home_dir` reads USERPROFILE on Windows and HOME elsewhere.
+    let env = [
+        ("HOME", h.to_str().unwrap()),
+        ("USERPROFILE", h.to_str().unwrap()),
+    ];
+    // Command-line arguments: a symbol and a range, with the address suffix kept.
+    let (code, out, err) = acus_env(&["show", "~/w.rs#worker", "~/w.rs:2-2"], &env);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("fn worker() {}") && out.contains("fn other() {}"),
+        "{out}"
+    );
+    // Lines of `acus run` get no shell either.
+    let (code, out, err) = acus_in_env(h, &["run"], "show ~/w.rs:1-1\n", &env);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("fn worker() {}"), "{out}");
+    // Paths named inside patch text, and the patch file itself.
+    std::fs::write(
+        h.join("p.patch"),
+        "*** Begin Patch\n*** Update File: ~/w.rs\n-fn other() {}\n+fn other() { 1 }\n*** End Patch\n",
+    )
+    .unwrap();
+    let (code, _, err) = acus_in_env(h, &["patch", "-q", "--file", "~/p.patch"], "", &env);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(h.join("w.rs")).unwrap(),
+        "fn worker() {}\nfn other() { 1 }\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn closed_stdout_ends_quietly() {
+    use std::io::Read;
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("in.txt");
+    std::fs::write(&input, "show src/lib.rs\n".repeat(5_000)).unwrap();
+    let mut child = bin()
+        .arg("run")
+        .stdin(std::fs::File::open(&input).unwrap())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/proj"))
+        .spawn()
+        .unwrap();
+    // Read a little, then close the pipe as `| head -1` does while output is still pending.
+    let mut first = [0; 16];
+    child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+    let status = child.wait().unwrap();
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_ne!(status.code(), Some(101), "{err}");
+    assert!(
+        !err.contains("Broken pipe") && !err.contains("panicked"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -453,10 +531,43 @@ fn guard_answers_hook_calls() {
         "tool_name": "Bash",
         "tool_input": {"command": "cd app && ls; cat settings.json; grep -n foo src/a.rs | head"},
     }));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert_eq!(o["permissionDecision"], "allow", "{out}");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "cd app && ls; cat settings.json; acus find 'foo' 'src/a.rs' | head",
+        "{out}"
+    );
+    assert!(o.get("permissionDecisionReason").is_none(), "{out}");
+    assert!(
+        o["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("instead of `grep -n foo src/a.rs`"),
+        "{out}"
+    );
+    // Other tool_input fields survive; a build pipe is rewritten in every mode, with no decision.
+    let build = serde_json::json!({
+        "tool_name": "Bash",
+        "permission_mode": "default",
+        "tool_input": {"command": "cargo test 2>&1 | tail -3", "timeout": 5000},
+    });
+    let v: serde_json::Value = serde_json::from_str(&guard(build)).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert!(o.get("permissionDecision").is_none(), "{v}");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "acus ctx 'cargo test' --tail 3"
+    );
+    assert_eq!(o["updatedInput"]["timeout"], 5000);
+    // In-place edits have no exact rewrite.
+    let out = guard(serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd app && cat a.rs; sed -i 's/a/b/' b.rs"},
+    }));
     assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
     assert!(out.contains("Nothing ran"), "{out}");
-    assert!(out.contains("`grep -n foo src/a.rs`"), "{out}");
-    assert!(out.contains("`acus find 'foo' 'src/a.rs'`"), "{out}");
 }
 
 #[test]
@@ -704,4 +815,43 @@ fn unstaged_diff_reads_the_index() {
         (code, out.as_str()),
         (0, "M b.rs +1 -1\n  fn two 5-7 +1 -1\n== 1 file +1 -1\n")
     );
+}
+
+#[test]
+fn guard_rewrite_quotes_every_copied_argument() {
+    use std::io::Write;
+    let run = |command: &str| {
+        let mut child = bin()
+            .arg("guard")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        write!(child.stdin.take().unwrap(), "{input}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let out = String::from_utf8(out.stdout).unwrap();
+        serde_json::from_str::<serde_json::Value>(&out)
+            .ok()
+            .and_then(|v| {
+                v["hookSpecificOutput"]["updatedInput"]["command"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+    };
+    for (input, want) in [
+        (
+            "cat 'a;touch pwn;.rs' b.rs",
+            "acus show 'a;touch pwn;.rs' 'b.rs'",
+        ),
+        (
+            "rg -t 'py;touch pwn' foo src",
+            "acus find 'foo' 'src' -t 'py;touch pwn'",
+        ),
+        ("cat 'my file.rs' b.rs", "acus show 'my file.rs' 'b.rs'"),
+        ("cat 'a&b.rs' b.rs", "acus show 'a&b.rs' 'b.rs'"),
+    ] {
+        assert_eq!(run(input).as_deref(), Some(want), "{input}");
+    }
 }

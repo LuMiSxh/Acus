@@ -9,7 +9,7 @@ use std::sync::Mutex;
 #[derive(clap::Args)]
 pub struct Args {
     /// Directory to map.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = crate::home::<PathBuf>)]
     path: PathBuf,
     /// Output budget in tokens (about 4 characters each); the largest directories are opened
     /// first until it is spent.

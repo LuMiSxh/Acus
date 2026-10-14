@@ -26,6 +26,11 @@ PATCH FORMAT (stdin or --file; all or nothing, nothing is written on an error):
   Context, `-` and SEARCH lines also match ignoring trailing whitespace and indentation if that
   is unique; `+` lines are then re-indented to the file and a `note:` says so.
 
+  If a hunk's lines are not adjacent in the file, it is applied as separate pieces when each
+  piece (a run of context or of -/+ groups) matches uniquely, in order. A hunk of only `-` lines
+  followed by as many `+` lines replaces text inside a line when each `-` text occurs exactly
+  once in the file. Both are reported in a `note:`; otherwise the patch fails.
+
 PART OF A LINE: *** Replace All: PATH [PATH...]
   Replaces every occurrence of a text in the files, directories (walked, .gitignore respected)
   and globs (*.py, matched anywhere below the current directory) named after the colon,
@@ -59,7 +64,7 @@ Example (add --fmt to format the written files):
 #[command(after_long_help = SYNTAX)]
 pub struct Args {
     /// Read the patch from this file instead of stdin.
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = crate::home::<PathBuf>)]
     file: Option<PathBuf>,
     /// Validate only; write nothing.
     #[arg(long)]
@@ -102,13 +107,22 @@ pub fn run(a: Args, out: &Out, nested: bool, cfg: &Config) -> Result<Outcome> {
     if (a.fmt || cfg.patch.fmt) && !a.no_fmt && !a.check {
         lines.extend(format_written(&applied.changes, &mut applied.regions));
     }
-    let notes: Vec<String> = match applied.tolerant.as_slice() {
-        [] => vec![],
-        t => vec![format!(
-            "note: tolerant match (whitespace/indentation) in {}",
-            t.join(", ")
-        )],
-    };
+    let mut notes: Vec<String> = Vec::new();
+    for (list, what) in [
+        (&applied.tolerant, "tolerant match (whitespace/indentation)"),
+        (
+            &applied.split,
+            "split match (lines were not adjacent, applied as separate parts)",
+        ),
+        (
+            &applied.partial,
+            "partial-line match (replaced text inside a line)",
+        ),
+    ] {
+        if !list.is_empty() {
+            notes.push(format!("note: {what} in {}", list.join(", ")));
+        }
+    }
     if out.format == Format::Json {
         let regions: Vec<_> = applied
             .regions

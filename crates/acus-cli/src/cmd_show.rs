@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 #[derive(clap::Args)]
 pub struct Args {
     /// path, path:START-END, path:LINE or path#Symbol (a unique suffix of the qualified name is enough).
-    #[arg(required = true)]
+    #[arg(required = true, value_parser = crate::home::<String>)]
     addrs: Vec<String>,
     /// Cap per address.
     #[arg(long, default_value_t = 400)]

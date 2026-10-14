@@ -77,11 +77,21 @@ pub struct Chunk {
     /// `@@` lines: each is searched for in turn before `old`.
     pub anchors: Vec<String>,
     pub old: Vec<String>,
+    /// The hunk's context, `-` and `+` lines in order (empty for SEARCH blocks).
+    pub steps: Vec<Step>,
     pub new: Vec<String>,
     pub added: usize,
     pub removed: usize,
     /// `*** End of File`: `old` must match at the end of the file.
     pub eof: bool,
+}
+
+/// One line of a hunk body as written in the patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Keep(String),
+    Del(String),
+    Add(String),
 }
 
 impl Chunk {
@@ -114,6 +124,45 @@ fn insert_addr(rest: &str, n: usize, directive: &str) -> Result<(String, InsertA
     {
         Some((p, l)) if !p.is_empty() => Ok((p.into(), InsertAt::Line(l))),
         _ => bail!("patch line {n}: expected `*** {directive}: path#Symbol` or `path:LINE`"),
+    }
+}
+
+/// Expands a leading `~` in every path the ops name: no shell runs on patch text.
+fn expand_home(ops: &mut [Op]) {
+    fn home(p: &mut String) {
+        *p = acus_walk::expand_home(p);
+    }
+    for op in ops {
+        match op {
+            Op::Add { path, .. }
+            | Op::Delete { path }
+            | Op::ReplaceSymbol { path, .. }
+            | Op::DeleteSymbol { path, .. }
+            | Op::Insert { path, .. } => home(path),
+            Op::Update { path, move_to, .. } => {
+                home(path);
+                if let Some(p) = move_to {
+                    home(p);
+                }
+            }
+            Op::ReplaceAll { paths, .. } => paths.iter_mut().for_each(home),
+            Op::MoveSymbol { path, to, .. } => {
+                home(path);
+                if let Some(dest) = to {
+                    match dest {
+                        Dest::Before { path, .. }
+                        | Dest::After { path, .. }
+                        | Dest::End { path } => home(path),
+                    }
+                }
+            }
+            Op::Copy { from, to } => {
+                home(from);
+                if let Some(p) = to {
+                    home(p);
+                }
+            }
+        }
     }
 }
 
@@ -317,6 +366,7 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
     if ops.is_empty() {
         bail!("empty patch\nhint: start with `*** Update File: PATH`");
     }
+    expand_home(&mut ops);
     Ok(ops)
 }
 
@@ -408,14 +458,17 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
                 " " | "" => {
                     c.old.push(rest.into());
                     c.new.push(rest.into());
+                    c.steps.push(Step::Keep(rest.into()));
                 }
                 "-" => {
                     c.old.push(rest.into());
                     c.removed += 1;
+                    c.steps.push(Step::Del(rest.into()));
                 }
                 "+" => {
                     c.new.push(rest.into());
                     c.added += 1;
+                    c.steps.push(Step::Add(rest.into()));
                 }
                 _ if line.starts_with("<<<<<<< REGEX") => bail!(
                     "patch line {n}: REGEX blocks belong under `*** Replace All: PATH`, not `*** Update File`\nhint: use `<<<<<<< SEARCH` here, or move the block under `*** Replace All: PATH [PATH...]`"

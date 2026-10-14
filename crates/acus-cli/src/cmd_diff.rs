@@ -13,6 +13,7 @@ const TOP: &str = "(top level)";
 #[derive(clap::Args)]
 pub struct Args {
     /// Optional revision (default HEAD, or `A..B`), then paths to limit to.
+    #[arg(value_parser = crate::home::<String>)]
     args: Vec<String>,
     /// Staged changes only (index against the revision).
     #[arg(long, alias = "cached")]
