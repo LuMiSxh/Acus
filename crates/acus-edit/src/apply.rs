@@ -1,4 +1,4 @@
-use crate::parse::{Block, Dest, InsertAt};
+use crate::parse::{Block, Dest, InsertAt, Step};
 use crate::{Chunk, Op};
 use acus_syntax::{Lang, Resolve, attached_start, outline, resolve};
 use anyhow::{Context, Result, anyhow, bail};
@@ -69,6 +69,10 @@ pub struct Applied {
     pub regions: Vec<Region>,
     /// `path hunk N` of every hunk that only matched ignoring whitespace or indentation.
     pub tolerant: Vec<String>,
+    /// `path hunk N` of every hunk applied as separate parts because its lines were not adjacent.
+    pub split: Vec<String>,
+    /// `path hunk N` of every hunk that replaced text inside a line.
+    pub partial: Vec<String>,
 }
 
 /// A file as the patch sees it; `lines: None` means deleted or not existing.
@@ -102,6 +106,8 @@ struct Files<'a> {
     root: &'a Path,
     map: BTreeMap<String, File>,
     tolerant: Vec<String>,
+    split: Vec<String>,
+    partial: Vec<String>,
 }
 
 impl Files<'_> {
@@ -165,6 +171,8 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
         root,
         map: BTreeMap::new(),
         tolerant: Vec::new(),
+        split: Vec::new(),
+        partial: Vec::new(),
     };
     let mut changes = Vec::new();
     for op in ops {
@@ -192,6 +200,8 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
         changes,
         regions,
         tolerant: files.tolerant,
+        split: files.split,
+        partial: files.partial,
     })
 }
 
@@ -227,9 +237,29 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
             files.lines(path)?;
             let f = files.get(path)?;
             let mut tol = Vec::new();
+            let (mut split, mut partial) = (Vec::new(), Vec::new());
             for (i, c) in chunks.iter().enumerate() {
-                let (at, pass) = locate_chunk(f.lines.as_ref().unwrap(), c, path)
-                    .map_err(|e| anyhow!("{path}: hunk {}: {e}", i + 1))?;
+                let lines = f.lines.as_ref().unwrap();
+                let (at, pass) = match locate_chunk(lines, c, path) {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        let name = format!("{path} hunk {}", i + 1);
+                        if let Some(sp) = split_hunk(lines, c, path) {
+                            for (at, n, new) in sp {
+                                f.splice(at, n, &new);
+                            }
+                            split.push(name);
+                        } else if let Some(sp) = partial_lines(lines, c) {
+                            for (at, n, new) in sp {
+                                f.splice(at, n, &new);
+                            }
+                            partial.push(name);
+                        } else {
+                            bail!("{path}: hunk {}: {e}", i + 1);
+                        }
+                        continue;
+                    }
+                };
                 if pass == 0 {
                     f.splice(at, c.old.len(), &c.new);
                 } else {
@@ -240,6 +270,8 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
                 }
             }
             files.tolerant.extend(tol);
+            files.split.extend(split);
+            files.partial.extend(partial);
             let (added, removed) = chunks
                 .iter()
                 .fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
@@ -810,6 +842,126 @@ fn locate(
         near_miss(lines, old, j),
         nearest(lines, old, path)
     )
+}
+
+/// A replacement of `n` lines at `at`, positions counted after the earlier splices.
+type Splice = (usize, usize, Vec<String>);
+
+/// Runs of hunk lines that may not be pulled apart: one context line, or `-` lines with the
+/// `+` lines that follow them.
+fn atoms(steps: &[Step]) -> Vec<&[Step]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..steps.len() {
+        let cut = matches!(steps[i - 1], Step::Keep(_))
+            || matches!(steps[i], Step::Keep(_))
+            || matches!((&steps[i - 1], &steps[i]), (Step::Add(_), Step::Del(_)));
+        if cut {
+            out.push(&steps[start..i]);
+            start = i;
+        }
+    }
+    if !steps.is_empty() {
+        out.push(&steps[start..]);
+    }
+    out
+}
+
+/// Applies a hunk whose lines are not adjacent in the file as separate pieces, each matching
+/// uniquely after the previous one. Needs at least two pieces.
+fn split_hunk(lines: &[String], c: &Chunk, path: &str) -> Option<Vec<Splice>> {
+    let atoms = atoms(&c.steps);
+    let mut work = lines.to_vec();
+    let mut out = Vec::new();
+    let (mut s, mut pos, mut pieces) = (0, 0, 0);
+    while s < atoms.len() {
+        let mut found = None;
+        for e in (s + 1..=atoms.len()).rev() {
+            let steps: Vec<&Step> = atoms[s..e].iter().flat_map(|a| a.iter()).collect();
+            let old: Vec<String> = steps
+                .iter()
+                .filter_map(|st| match st {
+                    Step::Keep(l) | Step::Del(l) => Some(l.clone()),
+                    Step::Add(_) => None,
+                })
+                .collect();
+            if old.is_empty() {
+                continue;
+            }
+            let new: Vec<String> = steps
+                .iter()
+                .filter_map(|st| match st {
+                    Step::Keep(l) | Step::Add(l) => Some(l.clone()),
+                    Step::Del(_) => None,
+                })
+                .collect();
+            let piece = Chunk {
+                anchors: if pieces == 0 { c.anchors.clone() } else { vec![] },
+                old,
+                new,
+                eof: c.eof && e == atoms.len(),
+                ..Chunk::default()
+            };
+            let hit = if pieces == 0 {
+                locate_chunk(&work, &piece, path)
+            } else {
+                locate(&work, &piece.old, pos, piece.eof, path)
+            };
+            if let Ok((at, pass)) = hit {
+                found = Some((e, at, pass, piece));
+                break;
+            }
+        }
+        let (e, at, pass, piece) = found?;
+        let n = piece.old.len();
+        let new = if pass == 0 {
+            piece.new.clone()
+        } else {
+            tolerant_new(&work[at..at + n], &piece)
+        };
+        pos = at + new.len();
+        work.splice(at..at + n, new.iter().cloned());
+        out.push((at, n, new));
+        pieces += 1;
+        s = e;
+    }
+    (pieces >= 2).then_some(out)
+}
+
+/// Applies `-` lines followed by as many `+` lines, none with context, as text inside lines:
+/// every `-` text must occur exactly once in the file (after the `@@` anchors).
+fn partial_lines(lines: &[String], c: &Chunk) -> Option<Vec<Splice>> {
+    let dels: Vec<&str> = c
+        .steps
+        .iter()
+        .map_while(|s| if let Step::Del(l) = s { Some(l.as_str()) } else { None })
+        .collect();
+    let adds: Vec<&str> = c.steps[dels.len()..]
+        .iter()
+        .map_while(|s| if let Step::Add(l) = s { Some(l.as_str()) } else { None })
+        .collect();
+    if dels.is_empty() || dels.len() != adds.len() || dels.len() + adds.len() != c.steps.len() {
+        return None;
+    }
+    let mut from = 0;
+    for a in &c.anchors {
+        from = (from..lines.len()).find(|&i| lines[i].contains(a.trim()))?;
+    }
+    let mut work = lines.to_vec();
+    let mut out = Vec::new();
+    for (d, a) in dels.iter().zip(&adds) {
+        if d.trim().is_empty() {
+            return None;
+        }
+        let total: usize = work[from..].iter().map(|l| l.matches(d).count()).sum();
+        if total != 1 {
+            return None;
+        }
+        let i = (from..work.len()).find(|&i| work[i].contains(d))?;
+        work[i] = work[i].replacen(d, a, 1);
+        out.push((i, 1, vec![work[i].clone()]));
+    }
+    Some(out)
 }
 
 /// Rewrites the replacement of a hunk that matched only loosely: unchanged lines keep the

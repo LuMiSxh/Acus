@@ -93,7 +93,8 @@ fn partial_line_errors_name_replace_all() {
         .to_string()
     };
     // The first `-` line is part of a line.
-    let e = err("-call(x\n+call(z\n");
+    // (A matching `+` count would be replaced inside the line, so add a line.)
+    let e = err("-call(x\n+call(z\n+more\n");
     assert!(e.contains("line 2 only starts with it"), "{e}");
     assert!(e.contains("`*** Replace All: PATH`"), "{e}");
     assert!(e.contains("`<<<<<<< REGEX`"), "{e}");
@@ -191,6 +192,96 @@ fn whitespace_tolerant_match() {
     .unwrap();
     assert_eq!(read(d.path(), "a.py"), "def f():\n    return 2\n");
     assert_eq!(a.tolerant, ["a.py hunk 1"]);
+}
+
+#[test]
+fn non_adjacent_lines_apply_as_separate_pieces() {
+    let src = "a\n/// doc `x`\nconst Q: u8 = 1;\nconst O: u8 = 2;\nconst A: &str = \"c\";\nz\n";
+    let d = dir(&[("a.rs", src)]);
+    let p = "*** Update File: a.rs\n-/// doc `x`\n+/// doc `y`\n-const A: &str = \"c\";\n+const A: &str = \"d\";\n";
+    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
+    assert_eq!(
+        read(d.path(), "a.rs"),
+        "a\n/// doc `y`\nconst Q: u8 = 1;\nconst O: u8 = 2;\nconst A: &str = \"d\";\nz\n"
+    );
+    assert_eq!(a.split, ["a.rs hunk 1"]);
+    assert!(a.tolerant.is_empty());
+}
+
+#[test]
+fn split_keeps_context_with_its_piece() {
+    let d = dir(&[("a.txt", "one\ntwo\nx\ny\nthree\nfour\n")]);
+    let p = "*** Update File: a.txt\n one\n-two\n+2\n-three\n+3\n four\n";
+    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
+    assert_eq!(read(d.path(), "a.txt"), "one\n2\nx\ny\n3\nfour\n");
+    assert_eq!(a.split.len(), 1);
+}
+
+#[test]
+fn split_fails_when_a_piece_is_missing_ambiguous_or_out_of_order() {
+    let before = "a\nb\nx\nc\nb\n";
+    for (src, p, want) in [
+        // Second piece missing.
+        ("a\nx\nc\n", "-a\n+A\n-nope\n+N\n", "context not found"),
+        // First piece ambiguous (b is on lines 2 and 5): the original error stays.
+        (before, "-b\n+B\n-c\n+C\n", "context not found"),
+        // Pieces in the wrong order: the second must come after the first.
+        ("c\nx\na\n", "-a\n+A\n-c\n+C\n", "context not found"),
+    ] {
+        let d = dir(&[("a.txt", src)]);
+        let patch = format!("*** Update File: a.txt\n{p}");
+        let e = run(d.path(), &patch).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
+        assert_eq!(read(d.path(), "a.txt"), src);
+    }
+}
+
+#[test]
+fn partial_lines_are_replaced_when_unique() {
+    let d = dir(&[(
+        "r.md",
+        "# T\n**[Guide](crates/c/README.md)** · [Changelog](crates/c/CHANGELOG.md)\nend\n",
+    )]);
+    let p = "*** Update File: r.md\n-[Changelog](crates/c/CHANGELOG.md)\n+[Changelog](CHANGELOG.md)\n";
+    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
+    assert_eq!(
+        read(d.path(), "r.md"),
+        "# T\n**[Guide](crates/c/README.md)** · [Changelog](CHANGELOG.md)\nend\n"
+    );
+    assert_eq!(a.partial, ["r.md hunk 1"]);
+}
+
+#[test]
+fn partial_lines_respect_anchors_and_refuse_ambiguity() {
+    let src = "[x] foo\nfn a\n[y] foo\n";
+    let d = dir(&[("a.txt", src)]);
+    let ambiguous = "*** Update File: a.txt\n-foo\n+bar\n";
+    let e = run(d.path(), ambiguous).unwrap_err().to_string();
+    assert!(e.contains("context not found"), "{e}");
+    assert_eq!(read(d.path(), "a.txt"), src);
+    // The anchor scopes the search to the lines after it.
+    run(d.path(), "*** Update File: a.txt\n@@ fn a\n-foo\n+bar\n").unwrap();
+    assert_eq!(read(d.path(), "a.txt"), "[x] foo\nfn a\n[y] bar\n");
+    // Twice in one line, a missing text and context lines are not partial replacements.
+    for (src, p) in [
+        ("foo foo\n", "-foo\n+bar\n"),
+        ("foo\nbaz\n", "-nope\n+bar\n"),
+        ("a foo\nb\n", " b\n-foo\n+bar\n"),
+        ("a foo\n", "-foo\n"),
+    ] {
+        let d = dir(&[("a.txt", src)]);
+        let patch = format!("*** Update File: a.txt\n{p}");
+        assert!(run(d.path(), &patch).is_err(), "{p}");
+        assert_eq!(read(d.path(), "a.txt"), src);
+    }
+}
+
+#[test]
+fn partial_lines_are_all_or_nothing_across_pairs() {
+    let d = dir(&[("a.txt", "one two\nthree\n")]);
+    let p = "*** Update File: a.txt\n-one\n-nope\n+1\n+2\n";
+    assert!(run(d.path(), p).is_err());
+    assert_eq!(read(d.path(), "a.txt"), "one two\nthree\n");
 }
 
 #[test]

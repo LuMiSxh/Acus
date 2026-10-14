@@ -77,11 +77,21 @@ pub struct Chunk {
     /// `@@` lines: each is searched for in turn before `old`.
     pub anchors: Vec<String>,
     pub old: Vec<String>,
+    /// The hunk's context, `-` and `+` lines in order (empty for SEARCH blocks).
+    pub steps: Vec<Step>,
     pub new: Vec<String>,
     pub added: usize,
     pub removed: usize,
     /// `*** End of File`: `old` must match at the end of the file.
     pub eof: bool,
+}
+
+/// One line of a hunk body as written in the patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Keep(String),
+    Del(String),
+    Add(String),
 }
 
 impl Chunk {
@@ -448,14 +458,17 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
                 " " | "" => {
                     c.old.push(rest.into());
                     c.new.push(rest.into());
+                    c.steps.push(Step::Keep(rest.into()));
                 }
                 "-" => {
                     c.old.push(rest.into());
                     c.removed += 1;
+                    c.steps.push(Step::Del(rest.into()));
                 }
                 "+" => {
                     c.new.push(rest.into());
                     c.added += 1;
+                    c.steps.push(Step::Add(rest.into()));
                 }
                 _ if line.starts_with("<<<<<<< REGEX") => bail!(
                     "patch line {n}: REGEX blocks belong under `*** Replace All: PATH`, not `*** Update File`\nhint: use `<<<<<<< SEARCH` here, or move the block under `*** Replace All: PATH [PATH...]`"

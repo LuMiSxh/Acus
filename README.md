@@ -161,6 +161,8 @@ Symbols are understood for Rust, Swift, TypeScript and JavaScript, Svelte, Pytho
 
 Context lines are matched exactly first, then without trailing whitespace, then without any surrounding whitespace. An `@@` anchor can be any part of a line, and the context may start on the anchor line itself. If a hunk matches in more than one place, the patch is refused and the error lists the candidate lines.
 
+Only when those fail are two fallbacks tried, each reported in a `note:`. A hunk whose lines are not adjacent is split between its `-`/`+` groups and applied as separate pieces if every piece matches uniquely, in order. A hunk of only `-` lines followed by as many `+` lines replaces text inside a line when each `-` text occurs exactly once in the file (after the `@@` anchor). Anything else still fails and applies nothing.
+
 Agents that would otherwise write a `sed -i` line or a small Python script get a few more directives:
 
 ```
