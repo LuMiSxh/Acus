@@ -380,7 +380,11 @@ fn tilde_paths_expand_to_home() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
     std::fs::write(h.join("w.rs"), "fn worker() {}\nfn other() {}\n").unwrap();
-    let env = [("HOME", h.to_str().unwrap())];
+    // `std::env::home_dir` reads USERPROFILE on Windows and HOME elsewhere.
+    let env = [
+        ("HOME", h.to_str().unwrap()),
+        ("USERPROFILE", h.to_str().unwrap()),
+    ];
     // Command-line arguments: a symbol and a range, with the address suffix kept.
     let (code, out, err) = acus_env(&["show", "~/w.rs#worker", "~/w.rs:2-2"], &env);
     assert_eq!(code, 0, "{err}");
