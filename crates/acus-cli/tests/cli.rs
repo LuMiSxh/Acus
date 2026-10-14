@@ -812,3 +812,42 @@ fn unstaged_diff_reads_the_index() {
         (0, "M b.rs +1 -1\n  fn two 5-7 +1 -1\n== 1 file +1 -1\n")
     );
 }
+
+#[test]
+fn guard_rewrite_quotes_every_copied_argument() {
+    use std::io::Write;
+    let run = |command: &str| {
+        let mut child = bin()
+            .arg("guard")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        write!(child.stdin.take().unwrap(), "{input}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let out = String::from_utf8(out.stdout).unwrap();
+        serde_json::from_str::<serde_json::Value>(&out)
+            .ok()
+            .and_then(|v| {
+                v["hookSpecificOutput"]["updatedInput"]["command"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+    };
+    for (input, want) in [
+        (
+            "cat 'a;touch pwn;.rs' b.rs",
+            "acus show 'a;touch pwn;.rs' 'b.rs'",
+        ),
+        (
+            "rg -t 'py;touch pwn' foo src",
+            "acus find 'foo' 'src' -t 'py;touch pwn'",
+        ),
+        ("cat 'my file.rs' b.rs", "acus show 'my file.rs' 'b.rs'"),
+        ("cat 'a&b.rs' b.rs", "acus show 'a&b.rs' 'b.rs'"),
+    ] {
+        assert_eq!(run(input).as_deref(), Some(want), "{input}");
+    }
+}

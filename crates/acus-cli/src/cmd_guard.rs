@@ -309,7 +309,7 @@ fn grep_tool(input: &Value, cwd: Option<&str>) -> Option<Verdict> {
         cmd += &format!(" -g {}", quote(g));
     }
     if let Some(t) = input["type"].as_str() {
-        cmd += &format!(" -t {t}");
+        cmd += &format!(" -t {}", quote(t));
     }
     if input["-i"].as_bool() == Some(true) {
         cmd += " -i";
@@ -1028,7 +1028,7 @@ fn parse_search<'a>(head: &str, args: &[&'a str]) -> Search<'a> {
                             s.flags.push(if c == 'g' {
                                 format!("-g {}", quote(unquote(v)))
                             } else {
-                                format!("-t {}", unquote(v))
+                                format!("-t {}", quote(unquote(v)))
                             });
                         }
                         break;
@@ -1248,7 +1248,8 @@ fn show_cmd(head: &str, args: &[&str]) -> Option<String> {
     }
     files.dedup();
     let [file] = files.as_slice() else {
-        return (!files.is_empty()).then(|| format!("`acus show {}`", files.join(" ")));
+        let quoted: Vec<String> = files.iter().map(|f| quote(f)).collect();
+        return (!files.is_empty()).then(|| format!("`acus show {}`", quoted.join(" ")));
     };
     let range = range.or(first.map(|n| (1, n)));
     Some(match range {
@@ -1694,7 +1695,7 @@ mod tests {
         let (_, r) = deny(check("cd a && sed -n '10,20p' src/a.rs"));
         assert!(r.contains("`acus show 'src/a.rs:10-20'`"), "{r}");
         let (_, r) = deny(check("true && cat a.rs b.rs"));
-        assert!(r.contains("`acus show a.rs b.rs`"), "{r}");
+        assert!(r.contains("`acus show 'a.rs' 'b.rs'`"), "{r}");
         let (_, r) = deny(check("cd x && sed -i 's/a/b/' a.rs b.rs"));
         assert!(r.contains("`*** Replace All: a.rs b.rs`"), "{r}");
         let (_, r) = deny(check("cd x && rg -n --glob '*.rs' -w foo"));
@@ -2225,7 +2226,7 @@ mod tests {
             json!({"pattern": "fn main", "path": "/repo/src", "output_mode": "content", "-C": 3, "type": "rust"}),
         );
         assert!(
-            r.contains("`acus find 'fn main' 'src' -t rust --block`"),
+            r.contains("`acus find 'fn main' 'src' -t 'rust' --block`"),
             "{r}"
         );
         let r = deny(json!({"pattern": "it's", "path": "/repo", "glob": "*.md"}));
