@@ -28,14 +28,14 @@ fn no_temp_files(root: &Path) {
 }
 
 #[test]
-fn update_with_anchor_and_context() {
+fn search_block_adds_lines_after_a_unique_match() {
     let d = dir(&[(
         "a.rs",
         "fn one() {\n    let x = 1;\n}\n\nfn two() {\n    let x = 1;\n}\n",
     )]);
     let c = run(
         d.path(),
-        "*** Begin Patch\n*** Update File: a.rs\n@@ fn two\n-    let x = 1;\n+    let x = 2;\n+    let y = 3;\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: a.rs\n<<<<<<< SEARCH\nfn two() {\n    let x = 1;\n=======\nfn two() {\n    let x = 2;\n    let y = 3;\n>>>>>>> REPLACE\n*** End Patch\n",
     )
     .unwrap();
     assert_eq!(
@@ -44,68 +44,6 @@ fn update_with_anchor_and_context() {
     );
     assert_eq!(c[0].to_string(), "M a.rs +2 -1");
     no_temp_files(d.path());
-}
-
-#[test]
-fn anchor_may_be_the_first_context_line_or_part_of_a_line() {
-    let d = dir(&[(
-        "a.rs",
-        "const A: u8 = 1;\nconst B: u8 = 2;\n\npub fn solve() {\n    go(1);\n}\n",
-    )]);
-    run(
-        d.path(),
-        "*** Begin Patch\n*** Update File: a.rs\n@@ const B\n const B: u8 = 2;\n+const C: u8 = 3;\n@@ fn solve\n-    go(1);\n+    go(2);\n*** End Patch\n",
-    )
-    .unwrap();
-    assert_eq!(
-        read(d.path(), "a.rs"),
-        "const A: u8 = 1;\nconst B: u8 = 2;\nconst C: u8 = 3;\n\npub fn solve() {\n    go(2);\n}\n"
-    );
-}
-
-#[test]
-fn context_errors_point_at_the_near_miss() {
-    let d = dir(&[(
-        "a.rs",
-        "/// Long doc line, cut short.\nfn a() {\n    x();\n}\n",
-    )]);
-    let err = |p: &str| {
-        run(
-            d.path(),
-            &format!("*** Begin Patch\n*** Update File: a.rs\n{p}*** End Patch\n"),
-        )
-        .unwrap_err()
-        .to_string()
-    };
-    assert!(err(" /// Long doc line\n+fn b() {}\n").contains("line 1 only starts with it"));
-    assert!(err(" fn a() {\n-    y();\n").contains("line 3 is `    x();`, not `    y();`"));
-}
-
-#[test]
-fn partial_line_errors_name_replace_all() {
-    let d = dir(&[("a.rs", "fn a() {\n    call(x, y);\n}\n")]);
-    let err = |p: &str| {
-        run(
-            d.path(),
-            &format!("*** Begin Patch\n*** Update File: a.rs\n{p}*** End Patch\n"),
-        )
-        .unwrap_err()
-        .to_string()
-    };
-    // The first `-` line is part of a line.
-    // (A matching `+` count would be replaced inside the line, so add a line.)
-    let e = err("-call(x\n+call(z\n+more\n");
-    assert!(e.contains("line 2 only starts with it"), "{e}");
-    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
-    assert!(e.contains("`<<<<<<< REGEX`"), "{e}");
-    // A later line is part of a line, with the first one matching whole.
-    let e = err(" fn a() {\n-    call(x\n+    call(z\n");
-    assert!(e.contains("lines must match whole"), "{e}");
-    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
-    // Nothing similar at all.
-    let e = err("-nothing like it\n");
-    assert!(e.contains("must match whole lines"), "{e}");
-    assert!(e.contains("`*** Replace All: PATH`"), "{e}");
 }
 
 #[test]
@@ -148,22 +86,11 @@ fn unknown_directives_list_the_accepted_forms() {
 }
 
 #[test]
-fn hunk_may_start_just_above_its_anchor() {
-    let d = dir(&[("a.rs", "/// Old.\nfn a() {}\n")]);
-    run(
-        d.path(),
-        "*** Begin Patch\n*** Update File: a.rs\n@@ fn a\n-/// Old.\n+/// New.\n fn a() {}\n*** End Patch\n",
-    )
-    .unwrap();
-    assert_eq!(read(d.path(), "a.rs"), "/// New.\nfn a() {}\n");
-}
-
-#[test]
 fn ambiguous_context_is_rejected_and_nothing_written() {
     let d = dir(&[("a.rs", "x\ny\nx\n"), ("b.rs", "keep\n")]);
     let err = run(
         d.path(),
-        "*** Update File: b.rs\n-keep\n+changed\n*** Update File: a.rs\n-x\n+z\n",
+        "*** Update File: b.rs\n<<<<<<< SEARCH\nkeep\n=======\nchanged\n>>>>>>> REPLACE\n*** Update File: a.rs\n<<<<<<< SEARCH\nx\n=======\nz\n>>>>>>> REPLACE\n",
     )
     .unwrap_err()
     .to_string();
@@ -173,172 +100,38 @@ fn ambiguous_context_is_rejected_and_nothing_written() {
 }
 
 #[test]
-fn missing_context_names_the_line() {
+fn missing_search_names_the_line() {
     let d = dir(&[("a.rs", "a\n")]);
-    let err = run(d.path(), "*** Update File: a.rs\n-nope\n+x\n")
-        .unwrap_err()
-        .to_string();
+    let err = run(
+        d.path(),
+        "*** Update File: a.rs\n<<<<<<< SEARCH\nnope\n=======\nx\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("a.rs") && err.contains("`nope`"), "{err}");
 }
 
 #[test]
-fn whitespace_tolerant_match() {
-    let d = dir(&[("a.py", "def f():\n    return 1   \n")]);
-    let a = apply(
-        &parse("*** Update File: a.py\n def f():\n-  return 1\n+  return 2\n").unwrap(),
-        d.path(),
-        false,
-    )
-    .unwrap();
-    assert_eq!(read(d.path(), "a.py"), "def f():\n    return 2\n");
-    assert_eq!(a.tolerant, ["a.py hunk 1"]);
-}
-
-#[test]
-fn non_adjacent_lines_apply_as_separate_pieces() {
-    let src = "a\n/// doc `x`\nconst Q: u8 = 1;\nconst O: u8 = 2;\nconst A: &str = \"c\";\nz\n";
-    let d = dir(&[("a.rs", src)]);
-    let p = "*** Update File: a.rs\n-/// doc `x`\n+/// doc `y`\n-const A: &str = \"c\";\n+const A: &str = \"d\";\n";
-    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
-    assert_eq!(
-        read(d.path(), "a.rs"),
-        "a\n/// doc `y`\nconst Q: u8 = 1;\nconst O: u8 = 2;\nconst A: &str = \"d\";\nz\n"
-    );
-    assert_eq!(a.split, ["a.rs hunk 1"]);
-    assert!(a.tolerant.is_empty());
-}
-
-#[test]
-fn split_keeps_context_with_its_piece() {
-    let d = dir(&[("a.txt", "one\ntwo\nx\ny\nthree\nfour\n")]);
-    let p = "*** Update File: a.txt\n one\n-two\n+2\n-three\n+3\n four\n";
-    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
-    assert_eq!(read(d.path(), "a.txt"), "one\n2\nx\ny\n3\nfour\n");
-    assert_eq!(a.split.len(), 1);
-}
-
-#[test]
-fn split_fails_when_a_piece_is_missing_ambiguous_or_out_of_order() {
-    let before = "a\nb\nx\nc\nb\n";
-    for (src, p, want) in [
-        // Second piece missing.
-        ("a\nx\nc\n", "-a\n+A\n-nope\n+N\n", "context not found"),
-        // First piece ambiguous (b is on lines 2 and 5): the original error stays.
-        (before, "-b\n+B\n-c\n+C\n", "context not found"),
-        // Pieces in the wrong order: the second must come after the first.
-        ("c\nx\na\n", "-a\n+A\n-c\n+C\n", "context not found"),
-    ] {
-        let d = dir(&[("a.txt", src)]);
-        let patch = format!("*** Update File: a.txt\n{p}");
-        let e = run(d.path(), &patch).unwrap_err().to_string();
-        assert!(e.contains(want), "{e}");
-        assert_eq!(read(d.path(), "a.txt"), src);
-    }
-}
-
-#[test]
-fn partial_lines_are_replaced_when_unique() {
-    let d = dir(&[(
-        "r.md",
-        "# T\n**[Guide](crates/c/README.md)** · [Changelog](crates/c/CHANGELOG.md)\nend\n",
-    )]);
-    let p =
-        "*** Update File: r.md\n-[Changelog](crates/c/CHANGELOG.md)\n+[Changelog](CHANGELOG.md)\n";
-    let a = apply(&parse(p).unwrap(), d.path(), false).unwrap();
-    assert_eq!(
-        read(d.path(), "r.md"),
-        "# T\n**[Guide](crates/c/README.md)** · [Changelog](CHANGELOG.md)\nend\n"
-    );
-    assert_eq!(a.partial, ["r.md hunk 1"]);
-}
-
-#[test]
-fn partial_lines_respect_anchors_and_refuse_ambiguity() {
-    let src = "[x] foo\nfn a\n[y] foo\n";
-    let d = dir(&[("a.txt", src)]);
-    let ambiguous = "*** Update File: a.txt\n-foo\n+bar\n";
-    let e = run(d.path(), ambiguous).unwrap_err().to_string();
-    assert!(e.contains("context not found"), "{e}");
-    assert_eq!(read(d.path(), "a.txt"), src);
-    // The anchor scopes the search to the lines after it.
-    run(d.path(), "*** Update File: a.txt\n@@ fn a\n-foo\n+bar\n").unwrap();
-    assert_eq!(read(d.path(), "a.txt"), "[x] foo\nfn a\n[y] bar\n");
-    // Twice in one line, a missing text and context lines are not partial replacements.
-    for (src, p) in [
-        ("foo foo\n", "-foo\n+bar\n"),
-        ("foo\nbaz\n", "-nope\n+bar\n"),
-        ("a foo\nb\n", " b\n-foo\n+bar\n"),
-        ("a foo\n", "-foo\n"),
-    ] {
-        let d = dir(&[("a.txt", src)]);
-        let patch = format!("*** Update File: a.txt\n{p}");
-        assert!(run(d.path(), &patch).is_err(), "{p}");
-        assert_eq!(read(d.path(), "a.txt"), src);
-    }
-}
-
-#[test]
-fn partial_lines_are_all_or_nothing_across_pairs() {
+fn search_blocks_are_all_or_nothing() {
     let d = dir(&[("a.txt", "one two\nthree\n")]);
-    let p = "*** Update File: a.txt\n-one\n-nope\n+1\n+2\n";
+    let p = "*** Update File: a.txt\n<<<<<<< SEARCH\none\n=======\n1\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nnope\n=======\n2\n>>>>>>> REPLACE\n";
     assert!(run(d.path(), p).is_err());
     assert_eq!(read(d.path(), "a.txt"), "one two\nthree\n");
 }
 
 #[test]
-fn tolerant_match_reindents_added_lines_and_keeps_file_context() {
-    let d = dir(&[(
-        "a.rs",
-        "impl A {\n\tfn f() {\n\t\tone();\n\t\ttwo();\n\t}\n}\n",
-    )]);
-    // Spaces in the patch, tabs in the file; context keeps the file's own lines.
-    run(
-        d.path(),
-        "*** Update File: a.rs\n     fn f() {\n         one();\n+        mid();\n+            deep();\n         two();\n",
-    )
-    .unwrap();
-    assert_eq!(
-        read(d.path(), "a.rs"),
-        "impl A {\n\tfn f() {\n\t\tone();\n\t\tmid();\n\t\t\tdeep();\n\t\ttwo();\n\t}\n}\n"
-    );
-    // Same kind of indent, patch at column 0 while the file is nested: add the offset.
-    let d = dir(&[("b.py", "class A:\n    def f(self):\n        return 1\n")]);
-    run(
-        d.path(),
-        "*** Update File: b.py\n-def f(self):\n-    return 1\n+def f(self):\n+    return 2\n+\n+def g(self):\n+    pass\n",
-    )
-    .unwrap();
-    assert_eq!(
-        read(d.path(), "b.py"),
-        "class A:\n    def f(self):\n        return 2\n\n    def g(self):\n        pass\n"
-    );
-}
-
-#[test]
-fn tolerant_match_must_be_unique_and_exact_matches_are_not_reported() {
-    let d = dir(&[("a.txt", "  x\n    x\ny\n")]);
-    let e = run(d.path(), "*** Update File: a.txt\n-x\n+z\n")
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("context matches at lines 1, 2"), "{e}");
-    let a = apply(
-        &parse("*** Update File: a.txt\n-y\n+z\n").unwrap(),
-        d.path(),
-        true,
-    )
-    .unwrap();
-    assert!(a.tolerant.is_empty());
-    // SEARCH blocks are tolerant as well.
+fn search_ignores_trailing_whitespace_only_when_exact_text_is_missing() {
+    // SEARCH blocks ignore trailing whitespace when the exact text does not occur.
     let d = dir(&[("a.rs", "fn f() {\n    a();   \n}\n")]);
     let a = apply(
-        &parse("*** Update File: a.rs\n<<<<<<< SEARCH\n  a();\n=======\n  b();\n>>>>>>> REPLACE\n")
+        &parse("*** Update File: a.rs\n<<<<<<< SEARCH\n    a();\n}\n=======\n    b();\n>>>>>>> REPLACE\n")
             .unwrap(),
         d.path(),
         false,
     )
     .unwrap();
-    assert_eq!(read(d.path(), "a.rs"), "fn f() {\n    b();\n}\n");
-    assert_eq!(a.tolerant.len(), 1);
+    assert_eq!(read(d.path(), "a.rs"), "fn f() {\n    b();\n");
+    assert_eq!(a.trailing, ["a.rs block 1"]);
 }
 
 #[test]
@@ -349,23 +142,29 @@ fn context_not_found_names_the_nearest_region() {
     let d = dir(&[("src/a.rs", &text)]);
     let e = run(
         d.path(),
-        "*** Update File: src/a.rs\n fn target(a: u32) {\n-    let value = compute(a, 1);\n     finish(value);\n+    done();\n",
+        "*** Update File: src/a.rs\n<<<<<<< SEARCH\nfn target(a: u32) {\n    let value = compute(a, 1);\n    finish(value);\n=======\nfn target(a: u32) {\n    done();\n>>>>>>> REPLACE\n",
     )
     .unwrap_err()
     .to_string();
     assert!(e.contains("nearest: src/a.rs:31-33\n31\tfn target(a: u8) {\n32\t    let value = compute(a);\n33\t    finish(value);"), "{e}");
     // Nothing alike: no nearest line.
-    let e = run(d.path(), "*** Update File: src/a.rs\n-qqqq zzzz\n+x\n")
-        .unwrap_err()
-        .to_string();
+    let e = run(
+        d.path(),
+        "*** Update File: src/a.rs\n<<<<<<< SEARCH\nqqqq zzzz\n=======\nx\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
     assert!(!e.contains("nearest:"), "{e}");
     // Long regions are capped.
     let text: String = (1..=12).map(|i| format!("row number {i}\n")).collect();
     let d = dir(&[("b.txt", &text)]);
-    let patch: String = (1..=12).map(|i| format!("-row numbr {i}\n")).collect();
-    let e = run(d.path(), &format!("*** Update File: b.txt\n{patch}"))
-        .unwrap_err()
-        .to_string();
+    let patch: String = (1..=12).map(|i| format!("row numbr {i}\n")).collect();
+    let e = run(
+        d.path(),
+        &format!("*** Update File: b.txt\n<<<<<<< SEARCH\n{patch}=======\nx\n>>>>>>> REPLACE\n"),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         e.contains("nearest: b.txt:1-12") && e.contains("… 4 more lines"),
         "{e}"
@@ -417,7 +216,7 @@ fn insert_mixes_with_other_ops_all_or_nothing() {
     let d = dir(&[("a.rs", "fn one() {}\n"), ("b.txt", "keep\n")]);
     let e = run(
         d.path(),
-        "*** Update File: b.txt\n-keep\n+changed\n*** Insert After: a.rs#missing\n+x\n",
+        "*** Update File: b.txt\n<<<<<<< SEARCH\nkeep\n=======\nchanged\n>>>>>>> REPLACE\n*** Insert After: a.rs#missing\n+x\n",
     )
     .unwrap_err();
     assert!(e.to_string().contains("no symbol `missing`"), "{e:#}");
@@ -429,7 +228,7 @@ fn copy_file_then_update_the_copy() {
     let d = dir(&[("a.rs", "fn one() {}\r\n"), ("b.txt", "x\n")]);
     let c = run(
         d.path(),
-        "*** Copy File: a.rs\n*** To: sub/c.rs\n*** Update File: sub/c.rs\n-fn one() {}\n+fn two() {}\n",
+        "*** Copy File: a.rs\n*** To: sub/c.rs\n*** Update File: sub/c.rs\n<<<<<<< SEARCH\nfn one() {}\n=======\nfn two() {}\n>>>>>>> REPLACE\n",
     )
     .unwrap();
     assert_eq!(read(d.path(), "a.rs"), "fn one() {}\r\n");
@@ -459,7 +258,7 @@ fn add_delete_move() {
     let d = dir(&[("old.txt", "bye\n"), ("m.txt", "a\nb\n")]);
     let c = run(
         d.path(),
-        "*** Begin Patch\n*** Add File: new/n.txt\n+hello\n+world\n*** Delete File: old.txt\n*** Update File: m.txt\n*** Move to: moved.txt\n a\n-b\n+c\n*** End Patch",
+        "*** Begin Patch\n*** Add File: new/n.txt\n+hello\n+world\n*** Delete File: old.txt\n*** Update File: m.txt\n*** Move to: moved.txt\n<<<<<<< SEARCH\nb\n=======\nc\n>>>>>>> REPLACE\n*** End Patch",
     )
     .unwrap();
     assert_eq!(read(d.path(), "new/n.txt"), "hello\nworld\n");
@@ -480,16 +279,12 @@ fn add_delete_move() {
 #[test]
 fn preserves_crlf_and_missing_trailing_newline() {
     let d = dir(&[("w.txt", "a\r\nb\r\nc")]);
-    run(d.path(), "*** Update File: w.txt\n-b\n+B\n").unwrap();
+    run(
+        d.path(),
+        "*** Update File: w.txt\n<<<<<<< SEARCH\nb\n=======\nB\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
     assert_eq!(read(d.path(), "w.txt"), "a\r\nB\r\nc");
-}
-
-#[test]
-fn pure_insertions_and_end_of_file() {
-    let d = dir(&[("a.txt", "a\nb\n")]);
-    run(d.path(), "*** Update File: a.txt\n@@ a\n+after a\n").unwrap();
-    run(d.path(), "*** Update File: a.txt\n+tail\n*** End of File\n").unwrap();
-    assert_eq!(read(d.path(), "a.txt"), "a\nafter a\nb\ntail\n");
 }
 
 #[test]
@@ -513,7 +308,8 @@ fn replace_symbol() {
 #[test]
 fn check_mode_writes_nothing() {
     let d = dir(&[("a.txt", "a\n")]);
-    let ops = parse("*** Update File: a.txt\n-a\n+b\n").unwrap();
+    let ops =
+        parse("*** Update File: a.txt\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n").unwrap();
     apply(&ops, d.path(), true).unwrap();
     assert_eq!(read(d.path(), "a.txt"), "a\n");
 }
@@ -532,7 +328,11 @@ fn keeps_permissions() {
     let d = dir(&[("s.sh", "echo a\n")]);
     let p = d.path().join("s.sh");
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-    run(d.path(), "*** Update File: s.sh\n-echo a\n+echo b\n").unwrap();
+    run(
+        d.path(),
+        "*** Update File: s.sh\n<<<<<<< SEARCH\necho a\n=======\necho b\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
     assert_eq!(
         fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o755
@@ -542,11 +342,14 @@ fn keeps_permissions() {
 #[test]
 fn reports_written_regions_with_final_line_numbers() {
     let d = dir(&[("a.txt", "1\n2\n3\n4\n5\n6\n")]);
-    // Second hunk sits above the first one; its insertion shifts the first region down.
-    let p = "*** Begin Patch\n*** Update File: a.txt\n@@ 4\n-5\n+five\n+FIVE\n*** Update File: a.txt\n@@ 1\n+one-and-a-half\n*** End Patch\n";
+    // The second block sits above the first one; its insertion shifts the first region down.
+    let p = "*** Begin Patch\n*** Update File: a.txt\n<<<<<<< SEARCH\n5\n=======\nfive\nFIVE\n>>>>>>> REPLACE\n*** Update File: a.txt\n<<<<<<< SEARCH\n2\n=======\n2\none-and-a-half\n>>>>>>> REPLACE\n*** End Patch\n";
     let r = apply(&parse(p).unwrap(), d.path(), true).unwrap().regions;
     let got: Vec<_> = r.iter().map(|r| (r.start, r.lines.join(","))).collect();
-    assert_eq!(got, [(2, "one-and-a-half".into()), (6, "five,FIVE".into())]);
+    assert_eq!(
+        got,
+        [(2, "2,one-and-a-half".into()), (6, "five,FIVE".into())]
+    );
     assert_eq!(
         read(d.path(), "a.txt"),
         "1\n2\n3\n4\n5\n6\n",
@@ -562,7 +365,7 @@ fn search_replace_blocks_inside_update() {
     )]);
     let c = run(
         d.path(),
-        "*** Update File: a.rs\n@@ fn two\n<<<<<<< SEARCH\n    a();\n=======\n    z();\n>>>>>>> REPLACE\n<<<<<<<\n    a();\n    b();\n=======\n    b();\n>>>>>>>\n",
+        "*** Update File: a.rs\n<<<<<<< SEARCH\nfn two() {\n    a();\n=======\nfn two() {\n    z();\n>>>>>>> REPLACE\n<<<<<<<\n    a();\n    b();\n=======\n    b();\n>>>>>>>\n",
     )
     .unwrap();
     assert_eq!(
@@ -738,4 +541,135 @@ fn moved_symbols_take_the_indent_of_their_new_place() {
         read(d.path(), "a.py"),
         "class A:\n    def m(self):\n        return 1\n\n    def n(self):\n        pass\n\n\ndef top():\n    pass\n"
     );
+}
+
+#[test]
+fn search_replaces_text_inside_lines_and_across_lines() {
+    let d = dir(&[("a.rs", "let x = old_name(1);\n")]);
+    run(
+        d.path(),
+        "*** Update File: a.rs\n<<<<<<< SEARCH\nold_name\n=======\nnew_name\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "let x = new_name(1);\n");
+
+    // The text starts and ends in the middle of lines.
+    let d = dir(&[("b.rs", "x = 1; y = 2;\nz = 3;\nw\n")]);
+    let c = run(
+        d.path(),
+        "*** Update File: b.rs\n<<<<<<< SEARCH\ny = 2;\nz\n=======\nq\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "b.rs"), "x = 1; q = 3;\nw\n");
+    assert_eq!(c[0].to_string(), "M b.rs +1 -2");
+}
+
+#[test]
+fn search_must_match_exactly_once() {
+    let d = dir(&[("a.txt", "x\nfoo\nx\nfoo\nfoo\n")]);
+    let e = run(
+        d.path(),
+        "*** Update File: a.txt\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("SEARCH matches 3 times (lines 2, 4, 5); add surrounding lines to make it unique, or use *** Replace All:"),
+        "{e}"
+    );
+    assert_eq!(read(d.path(), "a.txt"), "x\nfoo\nx\nfoo\nfoo\n");
+
+    let d = dir(&[("a.rs", "fn main() {\n    run(1);\n}\n")]);
+    let e = run(
+        d.path(),
+        "*** Update File: a.rs\n<<<<<<< SEARCH\n    run(2);\n=======\n    run(3);\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("block 1: SEARCH not found, first line `run(2);`"),
+        "{e}"
+    );
+    assert!(e.contains("nearest: a.rs:2\n2\t    run(1);"), "{e}");
+}
+
+#[test]
+fn search_falls_back_to_line_number_prefixes() {
+    let d = dir(&[("a.rs", "fn a() {\n    x();\n}\n")]);
+    let a = apply(
+        &parse("*** Update File: a.rs\n<<<<<<< SEARCH\n2\t    x();\n=======\n2\t    y();\n>>>>>>> REPLACE\n").unwrap(),
+        d.path(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.rs"), "fn a() {\n    y();\n}\n");
+    assert_eq!(a.numbered, ["a.rs block 1"]);
+}
+
+#[test]
+fn search_must_not_be_empty_or_equal_to_replace() {
+    let e = |p: &str| parse(p).unwrap_err().to_string();
+    let m = e("*** Update File: a.rs\n<<<<<<< SEARCH\n=======\nx\n>>>>>>> REPLACE\n");
+    assert!(
+        m.contains("empty SEARCH")
+            && m.contains("*** Insert After: PATH#Symbol")
+            && m.contains("*** Add File: PATH"),
+        "{m}"
+    );
+    let m = e("*** Update File: a.rs\n<<<<<<< SEARCH\nx\n=======\nx\n>>>>>>> REPLACE\n");
+    assert!(m.contains("SEARCH is identical to REPLACE"), "{m}");
+}
+
+#[test]
+fn update_file_rejects_hunk_lines() {
+    let d = dir(&[("a.txt", "a\n")]);
+    for hunk in ["@@ a\n-a\n+b\n", " a\n+b\n", "-a\n+b\n"] {
+        let e = run(d.path(), &format!("*** Update File: a.txt\n{hunk}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(
+                "patch line 2: *** Update File: takes SEARCH/REPLACE blocks, not @@/-/+ hunk lines"
+            ),
+            "{e}"
+        );
+        assert!(
+            e.contains(
+                "`<<<<<<< SEARCH` / `old text` / `=======` / `new text` / `>>>>>>> REPLACE`"
+            ),
+            "{e}"
+        );
+    }
+    assert_eq!(read(d.path(), "a.txt"), "a\n");
+}
+
+#[test]
+fn search_refuses_ambiguous_text_and_writes_nothing() {
+    let src = "[x] foo\nfn a\n[y] foo\n";
+    let d = dir(&[("a.txt", src)]);
+    let e = run(
+        d.path(),
+        "*** Update File: a.txt\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("SEARCH matches 2 times (lines 1, 3)"), "{e}");
+    assert_eq!(read(d.path(), "a.txt"), src);
+    // Uniqueness is counted over the whole file, so a later line can make the text unique.
+    run(
+        d.path(),
+        "*** Update File: a.txt\n<<<<<<< SEARCH\n[y] foo\n=======\n[y] bar\n>>>>>>> REPLACE\n",
+    )
+    .unwrap();
+    assert_eq!(read(d.path(), "a.txt"), "[x] foo\nfn a\n[y] bar\n");
+    // Text inside one line that occurs twice is ambiguous too.
+    let d = dir(&[("b.txt", "foo foo\n")]);
+    let e = run(
+        d.path(),
+        "*** Update File: b.txt\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("SEARCH matches 2 times (lines 1, 1)"), "{e}");
+    assert_eq!(read(d.path(), "b.txt"), "foo foo\n");
 }

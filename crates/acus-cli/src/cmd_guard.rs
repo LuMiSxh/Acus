@@ -2161,7 +2161,7 @@ mod tests {
             "ls src && find . -name '*.rs'",
             "python3 - <<'EOF'\nimport json\nprint(json.load(open('data.json'))['x'].replace('a','b'))\nEOF",
             "python3 - <<'EOF'\nrows=open('in.csv').read().replace(';',',')\nopen('out.csv','w').write(rows)\nEOF",
-            "acus patch <<'P'\n*** Update File: tool.py\n+open('a.py','w').write(s.replace('a','b'))\nP",
+            "acus patch <<'P'\n*** Update File: tool.py\n<<<<<<< SEARCH\nx\n=======\nopen('a.py','w').write(s.replace('a','b'))\n>>>>>>> REPLACE\nP",
         ] {
             assert_eq!(check(cmd), None, "{cmd}");
         }

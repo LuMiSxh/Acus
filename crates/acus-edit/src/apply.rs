@@ -1,4 +1,4 @@
-use crate::parse::{Block, Dest, InsertAt, Step};
+use crate::parse::{Block, Dest, InsertAt};
 use crate::{Chunk, Op};
 use acus_syntax::{Lang, Resolve, attached_start, outline, resolve};
 use anyhow::{Context, Result, anyhow, bail};
@@ -67,12 +67,10 @@ pub struct Region {
 pub struct Applied {
     pub changes: Vec<Change>,
     pub regions: Vec<Region>,
-    /// `path hunk N` of every hunk that only matched ignoring whitespace or indentation.
-    pub tolerant: Vec<String>,
-    /// `path hunk N` of every hunk applied as separate parts because its lines were not adjacent.
-    pub split: Vec<String>,
-    /// `path hunk N` of every hunk that replaced text inside a line.
-    pub partial: Vec<String>,
+    /// `path block N` of every SEARCH block that matched only after its line-number prefixes were removed.
+    pub numbered: Vec<String>,
+    /// `path block N` of every SEARCH block that matched only ignoring trailing whitespace.
+    pub trailing: Vec<String>,
 }
 
 /// A file as the patch sees it; `lines: None` means deleted or not existing.
@@ -105,9 +103,8 @@ impl File {
 struct Files<'a> {
     root: &'a Path,
     map: BTreeMap<String, File>,
-    tolerant: Vec<String>,
-    split: Vec<String>,
-    partial: Vec<String>,
+    numbered: Vec<String>,
+    trailing: Vec<String>,
 }
 
 impl Files<'_> {
@@ -170,9 +167,8 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     let mut files = Files {
         root,
         map: BTreeMap::new(),
-        tolerant: Vec::new(),
-        split: Vec::new(),
-        partial: Vec::new(),
+        numbered: Vec::new(),
+        trailing: Vec::new(),
     };
     let mut changes = Vec::new();
     for op in ops {
@@ -199,9 +195,8 @@ pub fn apply(ops: &[Op], root: &Path, check: bool) -> Result<Applied> {
     Ok(Applied {
         changes,
         regions,
-        tolerant: files.tolerant,
-        split: files.split,
-        partial: files.partial,
+        numbered: files.numbered,
+        trailing: files.trailing,
     })
 }
 
@@ -236,45 +231,22 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
         } => {
             files.lines(path)?;
             let f = files.get(path)?;
-            let mut tol = Vec::new();
-            let (mut split, mut partial) = (Vec::new(), Vec::new());
+            let (mut numbered, mut trailing) = (Vec::new(), Vec::new());
+            let (mut added, mut removed) = (0, 0);
             for (i, c) in chunks.iter().enumerate() {
-                let lines = f.lines.as_ref().unwrap();
-                let (at, pass) = match locate_chunk(lines, c, path) {
-                    Ok(hit) => hit,
-                    Err(e) => {
-                        let name = format!("{path} hunk {}", i + 1);
-                        if let Some(sp) = split_hunk(lines, c, path) {
-                            for (at, n, new) in sp {
-                                f.splice(at, n, &new);
-                            }
-                            split.push(name);
-                        } else if let Some(sp) = partial_lines(lines, c) {
-                            for (at, n, new) in sp {
-                                f.splice(at, n, &new);
-                            }
-                            partial.push(name);
-                        } else {
-                            bail!("{path}: hunk {}: {e}", i + 1);
-                        }
-                        continue;
-                    }
-                };
-                if pass == 0 {
-                    f.splice(at, c.old.len(), &c.new);
-                } else {
-                    let found = &f.lines.as_ref().unwrap()[at..at + c.old.len()];
-                    let new = tolerant_new(found, c);
-                    f.splice(at, c.old.len(), &new);
-                    tol.push(format!("{path} hunk {}", i + 1));
+                let (edit, fix) = search_block(f.lines.as_ref().unwrap(), c, path, i + 1)?;
+                let name = format!("{path} block {}", i + 1);
+                match fix {
+                    Some(Fix::Numbers) => numbered.push(name),
+                    Some(Fix::Trailing) => trailing.push(name),
+                    None => {}
                 }
+                added += edit.added;
+                removed += edit.removed;
+                f.splice(edit.at, edit.old, &edit.new);
             }
-            files.tolerant.extend(tol);
-            files.split.extend(split);
-            files.partial.extend(partial);
-            let (added, removed) = chunks
-                .iter()
-                .fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
+            files.numbered.extend(numbered);
+            files.trailing.extend(trailing);
             files.get(path)?.dirty = true;
             match move_to {
                 None => Change::Modified {
@@ -419,7 +391,9 @@ fn apply_op(files: &mut Files, op: &Op) -> Result<Vec<Change>> {
 fn symbol_lines(files: &mut Files, path: &str, symbol: &str) -> Result<(usize, usize)> {
     let src = files.lines(path)?.join("\n");
     let Some(o) = Lang::from_path(Path::new(path)).and_then(|l| outline(l, &src)) else {
-        bail!("{path}: no syntax support\nhint: use `*** Update File: {path}` with context lines");
+        bail!(
+            "{path}: no syntax support\nhint: use `*** Update File: {path}` with SEARCH/REPLACE blocks"
+        );
     };
     match resolve(&o, symbol) {
         Resolve::Found(s) => Ok((s.start_line - 1, s.end_line)),
@@ -430,7 +404,7 @@ fn symbol_lines(files: &mut Files, path: &str, symbol: &str) -> Result<(usize, u
                 .map(|s| format!("{path}#{} ({}-{})", s.qual, s.start_line, s.end_line))
                 .collect();
             bail!(
-                "{path}: `{symbol}` is ambiguous\nhint: {}; same names need `*** Update File:` with an anchor",
+                "{path}: `{symbol}` is ambiguous\nhint: {}; or edit the text with `*** Update File:` SEARCH blocks",
                 c.join(", ")
             )
         }
@@ -756,234 +730,70 @@ fn sub(c: &Captures, rep: &str, expand: bool) -> String {
     }
     r
 }
-
-type Eq = fn(&str, &str) -> bool;
-/// Exact first, then ignoring trailing, then all surrounding whitespace.
-const PASSES: [Eq; 3] = [
-    |a, b| a == b,
-    |a, b| a.trim_end() == b.trim_end(),
-    |a, b| a.trim() == b.trim(),
-];
-
-/// Where `c.old` sits in `lines` (insertion point for pure additions), and which pass of
-/// `PASSES` matched it (0 is exact).
-fn locate_chunk(lines: &[String], c: &Chunk, path: &str) -> Result<(usize, usize)> {
-    // `from` stays on the anchor line itself: agents often repeat it as the first context line.
-    let (mut from, mut after) = (0, 0);
-    for a in &c.anchors {
-        // Anchors may also be part of a line (`@@ fn parse` for `    pub fn parse(&self) {`).
-        let found = PASSES
-            .iter()
-            .chain([&((|l, a| l.trim_start().starts_with(a.trim())) as Eq)])
-            .chain([&((|l, a| l.contains(a.trim())) as Eq)])
-            .find_map(|eq| (after..lines.len()).find(|&i| eq(&lines[i], a)));
-        from = found.ok_or_else(|| anyhow!("`@@ {a}` not found"))?;
-        after = from + 1;
-    }
-    if c.old.is_empty() {
-        Ok((
-            if c.eof || c.anchors.is_empty() {
-                lines.len()
-            } else {
-                after
-            },
-            0,
-        ))
-    } else {
-        // Hunks often edit the doc comment or attributes just above their `@@ fn …` anchor.
-        locate(lines, &c.old, from, c.eof, path).or_else(|e| {
-            let back = from.saturating_sub(c.old.len());
-            if back < from {
-                locate(
-                    &lines[..from + c.old.len().min(lines.len() - from)],
-                    &c.old,
-                    back,
-                    c.eof,
-                    path,
-                )
-                .map_err(|_| e)
-            } else {
-                Err(e)
-            }
-        })
-    }
+/// A fallback that a SEARCH block needed to match.
+enum Fix {
+    /// The `acus show` line-number prefixes were removed from the block.
+    Numbers,
+    /// Trailing whitespace was ignored.
+    Trailing,
 }
 
-fn locate(
-    lines: &[String],
-    old: &[String],
-    from: usize,
-    eof: bool,
-    path: &str,
-) -> Result<(usize, usize)> {
-    let last = lines.len().checked_sub(old.len());
-    for (pass, eq) in PASSES.into_iter().enumerate() {
-        let Some(last) = last else { break };
-        let hits: Vec<usize> = (from..=last)
-            .filter(|&i| !eof || i == last)
-            .filter(|&i| old.iter().zip(&lines[i..]).all(|(o, l)| eq(l, o)))
-            .collect();
-        match hits.as_slice() {
-            [] => continue,
-            [i] => return Ok((*i, pass)),
-            _ => {
-                let at: Vec<_> = hits.iter().map(|i| (i + 1).to_string()).collect();
-                bail!(
-                    "context matches at lines {}\nhint: add an `@@ <enclosing line>` anchor or more context",
-                    at.join(", ")
-                )
-            }
-        }
-    }
-    let j = old.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
-    let first = old[j].trim();
-    bail!(
-        "context not found, first expected line `{first}`\n{}{}",
-        near_miss(lines, old, j),
-        nearest(lines, old, path)
-    )
+/// One replacement of a SEARCH block: the `old` lines from `at` become `new`.
+struct Edit {
+    at: usize,
+    old: usize,
+    new: Vec<String>,
+    added: usize,
+    removed: usize,
 }
 
-/// A replacement of `n` lines at `at`, positions counted after the earlier splices.
-type Splice = (usize, usize, Vec<String>);
-
-/// Runs of hunk lines that may not be pulled apart: one context line, or `-` lines with the
-/// `+` lines that follow them.
-fn atoms(steps: &[Step]) -> Vec<&[Step]> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for i in 1..steps.len() {
-        let cut = matches!(steps[i - 1], Step::Keep(_))
-            || matches!(steps[i], Step::Keep(_))
-            || matches!((&steps[i - 1], &steps[i]), (Step::Add(_), Step::Del(_)));
-        if cut {
-            out.push(&steps[start..i]);
-            start = i;
-        }
-    }
-    if !steps.is_empty() {
-        out.push(&steps[start..]);
-    }
-    out
+/// Byte offsets where `needle` occurs in `text`, overlapping occurrences included.
+fn occurrences(text: &str, needle: &str) -> Vec<usize> {
+    (0..text.len())
+        .filter(|&i| text.is_char_boundary(i) && text[i..].starts_with(needle))
+        .collect()
 }
 
-/// Applies a hunk whose lines are not adjacent in the file as separate pieces, each matching
-/// uniquely after the previous one. Needs at least two pieces.
-fn split_hunk(lines: &[String], c: &Chunk, path: &str) -> Option<Vec<Splice>> {
-    let atoms = atoms(&c.steps);
-    let mut work = lines.to_vec();
-    let mut out = Vec::new();
-    let (mut s, mut pos, mut pieces) = (0, 0, 0);
-    while s < atoms.len() {
-        let mut found = None;
-        for e in (s + 1..=atoms.len()).rev() {
-            let steps: Vec<&Step> = atoms[s..e].iter().flat_map(|a| a.iter()).collect();
-            let old: Vec<String> = steps
-                .iter()
-                .filter_map(|st| match st {
-                    Step::Keep(l) | Step::Del(l) => Some(l.clone()),
-                    Step::Add(_) => None,
-                })
+/// Every occurrence of `search` in `lines`, each as the edit that replaces it by `replace`.
+/// With `trim`, lines are compared without trailing whitespace, so `search` must be given that
+/// way too.
+fn search_edits(lines: &[String], search: &str, replace: &str, trim: bool) -> Vec<Edit> {
+    let view: Vec<&str> = lines
+        .iter()
+        .map(|l| if trim { l.trim_end() } else { l.as_str() })
+        .collect();
+    let text = view.join("\n");
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_of = |b: usize| starts.partition_point(|&s| s <= b) - 1;
+    occurrences(&text, search)
+        .into_iter()
+        .map(|ms| {
+            let me = ms + search.len();
+            let (first, last) = (line_of(ms), line_of(me));
+            let head = &lines[first][..ms - starts[first]];
+            let tail = &lines[last][me - starts[last]..];
+            let new: Vec<String> = format!("{head}{replace}{tail}")
+                .split('\n')
+                .map(Into::into)
                 .collect();
-            if old.is_empty() {
-                continue;
-            }
-            let new: Vec<String> = steps
-                .iter()
-                .filter_map(|st| match st {
-                    Step::Keep(l) | Step::Add(l) => Some(l.clone()),
-                    Step::Del(_) => None,
-                })
-                .collect();
-            let piece = Chunk {
-                anchors: if pieces == 0 {
-                    c.anchors.clone()
-                } else {
-                    vec![]
-                },
-                old,
+            let old = &lines[first..=last];
+            let (added, removed) = change_stats(old, &new);
+            Edit {
+                at: first,
+                old: old.len(),
                 new,
-                eof: c.eof && e == atoms.len(),
-                ..Chunk::default()
-            };
-            let hit = if pieces == 0 {
-                locate_chunk(&work, &piece, path)
-            } else {
-                locate(&work, &piece.old, pos, piece.eof, path)
-            };
-            if let Ok((at, pass)) = hit {
-                found = Some((e, at, pass, piece));
-                break;
-            }
-        }
-        let (e, at, pass, piece) = found?;
-        let n = piece.old.len();
-        let new = if pass == 0 {
-            piece.new.clone()
-        } else {
-            tolerant_new(&work[at..at + n], &piece)
-        };
-        pos = at + new.len();
-        work.splice(at..at + n, new.iter().cloned());
-        out.push((at, n, new));
-        pieces += 1;
-        s = e;
-    }
-    (pieces >= 2).then_some(out)
-}
-
-/// Applies `-` lines followed by as many `+` lines, none with context, as text inside lines:
-/// every `-` text must occur exactly once in the file (after the `@@` anchors).
-fn partial_lines(lines: &[String], c: &Chunk) -> Option<Vec<Splice>> {
-    let dels: Vec<&str> = c
-        .steps
-        .iter()
-        .map_while(|s| {
-            if let Step::Del(l) = s {
-                Some(l.as_str())
-            } else {
-                None
+                added,
+                removed,
             }
         })
-        .collect();
-    let adds: Vec<&str> = c.steps[dels.len()..]
-        .iter()
-        .map_while(|s| {
-            if let Step::Add(l) = s {
-                Some(l.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-    if dels.is_empty() || dels.len() != adds.len() || dels.len() + adds.len() != c.steps.len() {
-        return None;
-    }
-    let mut from = 0;
-    for a in &c.anchors {
-        from = (from..lines.len()).find(|&i| lines[i].contains(a.trim()))?;
-    }
-    let mut work = lines.to_vec();
-    let mut out = Vec::new();
-    for (d, a) in dels.iter().zip(&adds) {
-        if d.trim().is_empty() {
-            return None;
-        }
-        let total: usize = work[from..].iter().map(|l| l.matches(d).count()).sum();
-        if total != 1 {
-            return None;
-        }
-        let i = (from..work.len()).find(|&i| work[i].contains(d))?;
-        work[i] = work[i].replacen(d, a, 1);
-        out.push((i, 1, vec![work[i].clone()]));
-    }
-    Some(out)
+        .collect()
 }
 
-/// Rewrites the replacement of a hunk that matched only loosely: unchanged lines keep the
-/// file's text, added lines move by the indentation offset between the patch and the file.
-fn tolerant_new(found: &[String], c: &Chunk) -> Vec<String> {
-    let (old, new) = (&c.old, &c.new);
+/// Added and removed line counts of replacing `old` by `new`, not counting the lines they
+/// share at either end.
+fn change_stats(old: &[String], new: &[String]) -> (usize, usize) {
     let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let suf = old[pre..]
         .iter()
@@ -991,75 +801,81 @@ fn tolerant_new(found: &[String], c: &Chunk) -> Vec<String> {
         .zip(new[pre..].iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
-    let shift = Shift::between(old, found);
-    let mut out = found[..pre].to_vec();
-    out.extend(new[pre..new.len() - suf].iter().map(|l| shift.apply(l)));
-    out.extend_from_slice(&found[old.len() - suf..]);
-    out
+    (new.len() - pre - suf, old.len() - pre - suf)
 }
 
-/// How the patch's indentation differs from the file's.
-enum Shift {
-    Same,
-    Add(String),
-    Strip(String),
-    SpacesToTabs(usize),
-    TabsToSpaces(usize),
+/// `line` without the `acus show` line-number prefix (`12<TAB>`, with leading spaces or a `>`
+/// marker allowed), if it has one.
+fn strip_number(line: &str) -> Option<&str> {
+    let t = line.trim_start_matches(' ');
+    let t = t.strip_prefix('>').unwrap_or(t);
+    let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let rest = &t[digits..];
+    rest.strip_prefix('>').unwrap_or(rest).strip_prefix('\t')
 }
 
-impl Shift {
-    /// From the first non-blank line whose indentation differs.
-    fn between(old: &[String], found: &[String]) -> Shift {
-        let pair = old
-            .iter()
-            .zip(found)
-            .filter(|(o, _)| !o.trim().is_empty())
-            .map(|(o, f)| (indent(o), indent(f)))
-            .find(|(p, f)| p != f);
-        let Some((p, f)) = pair else {
-            return Shift::Same;
-        };
-        let only = |s: &str, c: char| !s.is_empty() && s.chars().all(|x| x == c);
-        if let Some(x) = f.strip_suffix(p) {
-            Shift::Add(x.into())
-        } else if let Some(x) = p.strip_suffix(f) {
-            Shift::Strip(x.into())
-        } else if only(p, ' ') && only(f, '\t') {
-            Shift::SpacesToTabs((p.len() / f.len()).max(1))
-        } else if only(p, '\t') && only(f, ' ') {
-            Shift::TabsToSpaces(f.len() / p.len())
-        } else {
-            Shift::Same
-        }
-    }
+/// `lines` without their line-number prefixes, if every non-empty line has one.
+fn unnumbered(lines: &[String]) -> Option<Vec<String>> {
+    lines
+        .iter()
+        .map(|l| match strip_number(l) {
+            Some(rest) => Some(rest.to_owned()),
+            None if l.is_empty() => Some(String::new()),
+            None => None,
+        })
+        .collect()
+}
 
-    fn apply(&self, line: &str) -> String {
-        if line.trim().is_empty() {
-            return line.to_owned();
-        }
-        let ind = indent(line);
-        let rest = &line[ind.len()..];
-        match self {
-            Shift::Same => line.to_owned(),
-            Shift::Add(x) => format!("{x}{line}"),
-            Shift::Strip(x) => line.strip_prefix(x.as_str()).unwrap_or(line).to_owned(),
-            Shift::SpacesToTabs(unit) if ind.chars().all(|c| c == ' ') => {
-                format!(
-                    "{}{}{rest}",
-                    "\t".repeat(ind.len() / unit),
-                    " ".repeat(ind.len() % unit)
-                )
+/// Applies the SEARCH block `c` (block `n` of its file) to `lines`: its text must occur exactly
+/// once in the file. The fallbacks run only when it does not occur at all, and each must also
+/// give exactly one match.
+fn search_block(lines: &[String], c: &Chunk, path: &str, n: usize) -> Result<(Edit, Option<Fix>)> {
+    let (search, replace) = (c.old.join("\n"), c.new.join("\n"));
+    let mut tries = vec![(None, search_edits(lines, &search, &replace, false))];
+    if let Some(old) = unnumbered(&c.old) {
+        let new = unnumbered(&c.new).unwrap_or_else(|| c.new.clone());
+        let found = search_edits(lines, &old.join("\n"), &new.join("\n"), false);
+        tries.push((Some(Fix::Numbers), found));
+    }
+    let trimmed = c
+        .old
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    tries.push((
+        Some(Fix::Trailing),
+        search_edits(lines, &trimmed, &replace, true),
+    ));
+    for (fix, mut found) in tries {
+        match found.len() {
+            0 => {}
+            1 => return Ok((found.swap_remove(0), fix)),
+            k => {
+                let at: Vec<String> = found.iter().map(|e| (e.at + 1).to_string()).collect();
+                bail!(
+                    "{path}: block {n}: SEARCH matches {k} times (lines {}); add surrounding lines to make it unique, or use *** Replace All: {path}",
+                    at.join(", ")
+                );
             }
-            Shift::TabsToSpaces(unit) => {
-                format!("{}{rest}", ind.replace('\t', &" ".repeat(*unit)))
-            }
-            Shift::SpacesToTabs(_) => line.to_owned(),
         }
     }
+    let first = c
+        .old
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map_or("", |l| l.trim());
+    bail!(
+        "{path}: block {n}: SEARCH not found, first line `{first}`\nhint: copy the text as the file has it, a part of a line is fine; re-read it with acus show{}",
+        nearest(lines, &c.old, path)
+    )
 }
 
 /// The window of `lines` most like `old`, as `nearest: PATH:A-B` plus its first lines, so a
-/// failed hunk can be fixed in one step.
+/// failed SEARCH block can be fixed in one step.
 fn nearest(lines: &[String], old: &[String], path: &str) -> String {
     const SHOWN: usize = 8;
     let n = old.len().min(lines.len());
@@ -1124,59 +940,6 @@ fn similarity(a: &str, b: &str, ba: &[(char, char)], bb: &[(char, char)]) -> f32
         }
     }
     2.0 * common as f32 / (ba.len() + bb.len()) as f32
-}
-
-/// Why the closest candidate failed, so the agent can fix the hunk without re-reading the file.
-/// What to do when a `-` line holds only part of a line.
-const PART_OF_LINE: &str = "for part of a line use `*** Replace All: PATH` with a `<<<<<<< SEARCH` block (literal text) or a `<<<<<<< REGEX` block, see `acus patch --help`";
-
-fn near_miss(lines: &[String], old: &[String], j: usize) -> String {
-    let first = old[j].trim();
-    // Report the candidate that matches the longest run of lines, not just the first one.
-    let best = (j..lines.len())
-        .filter(|&i| lines[i].trim() == first)
-        .filter_map(|i| {
-            let start = i - j;
-            let k = (0..old.len()).find(|&k| {
-                lines
-                    .get(start + k)
-                    .is_none_or(|l| l.trim() != old[k].trim())
-            })?;
-            Some((k, i, start))
-        })
-        .max_by_key(|&(k, i, _)| (k, std::cmp::Reverse(i)));
-    if let Some((k, i, start)) = best {
-        let found = lines.get(start + k).map_or("end of file", |l| l.as_str());
-        let part = if !old[k].trim().is_empty() && found.contains(old[k].trim()) {
-            format!(" (lines must match whole, not just a part of them; {PART_OF_LINE})")
-        } else {
-            String::new()
-        };
-        return format!(
-            "hint: {k} lines match from line {}, but line {} is `{found}`, not `{}`{part}",
-            i + 1,
-            start + k + 1,
-            old[k]
-        );
-    }
-    if let Some(i) = lines
-        .iter()
-        .position(|l| !first.is_empty() && l.contains(first))
-    {
-        let how = if lines[i].trim().starts_with(first) {
-            "only starts with"
-        } else {
-            "only contains"
-        };
-        return format!(
-            "hint: line {} {how} it; context, `-` and SEARCH lines must be whole lines ({PART_OF_LINE}): `{}`",
-            i + 1,
-            lines[i].trim()
-        );
-    }
-    format!(
-        "hint: re-read the file (acus show) and retry; context, `-` and SEARCH lines must match whole lines ({PART_OF_LINE})"
-    )
 }
 
 /// Writes every dirty file to a temp file next to it, then renames them all into place.

@@ -329,7 +329,7 @@ fn acus_in_env(
 fn patch_from_stdin() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("a.rs"), "fn f() {\n    1\n}\n").unwrap();
-    let p = "*** Begin Patch\n*** Update File: a.rs\n-    1\n+    2\n*** End Patch\n";
+    let p = "*** Begin Patch\n*** Update File: a.rs\n<<<<<<< SEARCH\n    1\n=======\n    2\n>>>>>>> REPLACE\n*** End Patch\n";
     assert_eq!(
         acus_in(d.path(), &["patch", "--check"], p),
         (
@@ -346,7 +346,7 @@ fn patch_from_stdin() {
     let (code, _, err) = acus_in(d.path(), &["patch"], p);
     assert_eq!(code, 2);
     assert!(
-        err.starts_with("error: a.rs: hunk 1: context not found"),
+        err.starts_with("error: a.rs: block 1: SEARCH not found"),
         "{err}"
     );
 }
@@ -354,25 +354,25 @@ fn patch_from_stdin() {
 #[test]
 fn patch_reports_tolerant_matches_and_new_directives() {
     let d = tempfile::tempdir().unwrap();
-    std::fs::write(d.path().join("a.py"), "def f():\n\treturn 1  \n").unwrap();
-    let p = "*** Update File: a.py\n def f():\n-    return 1\n+    return 2\n*** Copy File: a.py\n*** To: b.py\n*** Insert After: b.py:1\n+# top\n";
+    std::fs::write(d.path().join("a.py"), "def f():\n\treturn 1  \n\tpass\n").unwrap();
+    let p = "*** Update File: a.py\n<<<<<<< SEARCH\ndef f():\n\treturn 1\n\tpass\n=======\ndef f():\n\treturn 2\n\tpass\n>>>>>>> REPLACE\n*** Copy File: a.py\n*** To: b.py\n*** Insert After: b.py:1\n+# top\n";
     let (code, out, err) = acus_in(d.path(), &["patch", "-q"], p);
     assert_eq!((code, err.as_str()), (0, ""), "{out}");
     assert_eq!(
         out,
-        "M a.py +1 -1\nA b.py +2\nM b.py +1 -0\nnote: tolerant match (whitespace/indentation) in a.py hunk 1\n"
+        "M a.py +1 -1\nA b.py +3\nM b.py +1 -0\nnote: matched ignoring trailing whitespace in a.py block 1\n"
     );
     assert_eq!(
         std::fs::read_to_string(d.path().join("b.py")).unwrap(),
-        "def f():\n# top\n\treturn 2\n"
+        "def f():\n# top\n\treturn 2\n\tpass\n"
     );
     let (code, _, err) = acus_in(
         d.path(),
         &["patch"],
-        "*** Update File: a.py\n-nothing like\n",
+        "*** Update File: a.py\n<<<<<<< SEARCH\nnothing like\n=======\nx\n>>>>>>> REPLACE\n",
     );
     assert_eq!(code, 2);
-    assert!(err.contains("hunk 1: context not found"), "{err}");
+    assert!(err.contains("block 1: SEARCH not found"), "{err}");
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn tilde_paths_expand_to_home() {
     // Paths named inside patch text, and the patch file itself.
     std::fs::write(
         h.join("p.patch"),
-        "*** Begin Patch\n*** Update File: ~/w.rs\n-fn other() {}\n+fn other() { 1 }\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: ~/w.rs\n<<<<<<< SEARCH\nfn other() {}\n=======\nfn other() { 1 }\n>>>>>>> REPLACE\n*** End Patch\n",
     )
     .unwrap();
     let (code, _, err) = acus_in_env(h, &["patch", "-q", "--file", "~/p.patch"], "", &env);

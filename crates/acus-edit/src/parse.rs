@@ -71,33 +71,12 @@ pub enum Dest {
     End { path: String },
 }
 
-/// One hunk: `old` (context + removed) is replaced by `new` (context + added).
+/// One `<<<<<<< SEARCH` block of `*** Update File`: `old` must occur exactly once in the file
+/// and is replaced by `new`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Chunk {
-    /// `@@` lines: each is searched for in turn before `old`.
-    pub anchors: Vec<String>,
     pub old: Vec<String>,
-    /// The hunk's context, `-` and `+` lines in order (empty for SEARCH blocks).
-    pub steps: Vec<Step>,
     pub new: Vec<String>,
-    pub added: usize,
-    pub removed: usize,
-    /// `*** End of File`: `old` must match at the end of the file.
-    pub eof: bool,
-}
-
-/// One line of a hunk body as written in the patch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Step {
-    Keep(String),
-    Del(String),
-    Add(String),
-}
-
-impl Chunk {
-    fn is_empty(&self) -> bool {
-        self.anchors.is_empty() && self.old.is_empty() && self.new.is_empty()
-    }
 }
 
 /// Inside a SEARCH/REPLACE block: false while reading the search half, true for the replacement,
@@ -225,7 +204,7 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             ops.push(Op::Update {
                 path: p.trim().into(),
                 move_to: None,
-                chunks: vec![Chunk::default()],
+                chunks: vec![],
             });
         } else if let Some(p) = line.strip_prefix("*** Move to: ") {
             match ops.last_mut() {
@@ -244,11 +223,6 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
                 symbol: symbol.into(),
                 lines: vec![],
             });
-        } else if line == "*** End of File" {
-            match ops.last_mut() {
-                Some(Op::Update { chunks, .. }) => chunks.last_mut().unwrap().eof = true,
-                _ => bail!("patch line {n}: `*** End of File` outside `*** Update File`"),
-            }
         } else if let Some(p) = line.strip_prefix("*** Replace All: ") {
             ops.push(Op::ReplaceAll {
                 paths: p.split_whitespace().map(Into::into).collect(),
@@ -327,12 +301,6 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
     if stage.is_some() {
         bail!("unterminated SEARCH/REPLACE block\nhint: close it with `>>>>>>> REPLACE`");
     }
-    ops.retain_mut(|op| {
-        if let Op::Update { chunks, .. } = op {
-            chunks.retain(|c| !c.is_empty());
-        }
-        true
-    });
     for op in &ops {
         if let Op::Update {
             path,
@@ -398,85 +366,54 @@ fn body(op: Option<&mut Op>, line: &str, n: usize, stage: &mut Stage) -> Result<
                 if r { &mut b.replace } else { &mut b.search }.push(line.into());
             }
         },
-        Some(Op::Update { chunks, .. }) if stage.is_some() || opens(line) => {
-            match *stage {
-                None => {
-                    // Keep pending `@@` anchors; start fresh after a hunk with content.
-                    let c = chunks.last().unwrap();
-                    if !c.old.is_empty() || !c.new.is_empty() || c.eof {
-                        chunks.push(Chunk::default());
-                    }
-                    *stage = Some((false, 0));
-                }
-                Some((false, _)) if line.trim_end() == "=======" => *stage = Some((true, 0)),
-                Some((true, _)) if ends => {
-                    let c = chunks.last_mut().unwrap();
-                    if c.old.is_empty() {
-                        bail!(
-                            "patch line {n}: empty SEARCH\nhint: add an existing line to search for, or use a `@@` anchor with `+` lines"
-                        );
-                    }
-                    // Count only the lines that really change.
-                    let pre = c.old.iter().zip(&c.new).take_while(|(a, b)| a == b).count();
-                    let suf = c.old[pre..]
-                        .iter()
-                        .rev()
-                        .zip(c.new[pre..].iter().rev())
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    c.removed = c.old.len() - pre - suf;
-                    c.added = c.new.len() - pre - suf;
-                    chunks.push(Chunk::default());
-                    *stage = None;
-                }
-                Some((r, _)) => {
-                    let c = chunks.last_mut().unwrap();
-                    if r { &mut c.new } else { &mut c.old }.push(line.into());
-                }
+        Some(Op::Update { chunks, .. }) if stage.is_some() || opens(line) => match *stage {
+            None => {
+                chunks.push(Chunk::default());
+                *stage = Some((false, 0));
             }
-        }
+            Some((false, _)) if line.trim_end() == "=======" => *stage = Some((true, 0)),
+            Some((true, _)) if ends => {
+                let c = chunks.last().unwrap();
+                if c.old.join("\n").is_empty() {
+                    bail!(
+                        "patch line {n}: empty SEARCH\nhint: to add new lines use `*** Insert After: PATH#Symbol` or `*** Insert After: PATH:LINE`, or `*** Add File: PATH` for a new file"
+                    );
+                }
+                if c.old == c.new {
+                    bail!(
+                        "patch line {n}: SEARCH is identical to REPLACE, nothing to change\nhint: change the REPLACE lines, or drop the block"
+                    );
+                }
+                *stage = None;
+            }
+            Some((r, _)) => {
+                let c = chunks.last_mut().unwrap();
+                if r { &mut c.new } else { &mut c.old }.push(line.into());
+            }
+        },
         Some(
             Op::Add { lines, .. } | Op::ReplaceSymbol { lines, .. } | Op::Insert { lines, .. },
         ) => match line.strip_prefix('+') {
             Some(l) => lines.push(l.into()),
             None => bail!("patch line {n}: every new line must start with `+`"),
         },
-        Some(Op::Update { chunks, .. }) => {
-            let c = chunks.last_mut().unwrap();
-            if let Some(anchor) = line.strip_prefix("@@") {
-                if !c.old.is_empty() || !c.new.is_empty() || c.eof {
-                    chunks.push(Chunk::default());
-                }
-                let anchor = anchor.trim();
-                if !anchor.is_empty() {
-                    chunks.last_mut().unwrap().anchors.push(anchor.into());
-                }
+        Some(Op::Update { .. }) => {
+            if line.trim().is_empty() {
                 return Ok(());
             }
-            let (tag, rest) = line.split_at(line.len().min(1));
-            match tag {
-                " " | "" => {
-                    c.old.push(rest.into());
-                    c.new.push(rest.into());
-                    c.steps.push(Step::Keep(rest.into()));
-                }
-                "-" => {
-                    c.old.push(rest.into());
-                    c.removed += 1;
-                    c.steps.push(Step::Del(rest.into()));
-                }
-                "+" => {
-                    c.new.push(rest.into());
-                    c.added += 1;
-                    c.steps.push(Step::Add(rest.into()));
-                }
-                _ if line.starts_with("<<<<<<< REGEX") => bail!(
+            if line.starts_with("<<<<<<< REGEX") {
+                bail!(
                     "patch line {n}: REGEX blocks belong under `*** Replace All: PATH`, not `*** Update File`\nhint: use `<<<<<<< SEARCH` here, or move the block under `*** Replace All: PATH [PATH...]`"
-                ),
-                _ => bail!(
-                    "patch line {n}: expected ` `, `-`, `+` or `@@` at line start, got `{line}`"
-                ),
+                );
             }
+            if line.starts_with(['@', '-', '+', ' ']) {
+                bail!(
+                    "patch line {n}: *** Update File: takes SEARCH/REPLACE blocks, not @@/-/+ hunk lines\nhint: each change is `<<<<<<< SEARCH` / `old text` / `=======` / `new text` / `>>>>>>> REPLACE`"
+                );
+            }
+            bail!(
+                "patch line {n}: expected `<<<<<<< SEARCH` under `*** Update File`, got `{line}`\nhint: each change is `<<<<<<< SEARCH` / `old text` / `=======` / `new text` / `>>>>>>> REPLACE`"
+            )
         }
         Some(Op::Delete { path }) => {
             bail!("patch line {n}: unexpected content after `*** Delete File: {path}`")

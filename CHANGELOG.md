@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.12.0]
+
+### Added
+
+- `acus skill --install` takes `--agent claude|codex|all` (default `claude`, which writes only `~/.claude/skills/acus/`); `acus update` reinstalls the skill for the agents that already have it.
+
+### Changed
+
+- `acus patch` edits text with SEARCH/REPLACE blocks under `*** Update File:`, with the semantics of Claude's Edit tool: the old text is a substring (part of a line or several lines) that must occur exactly once in the file. With no match the error shows the nearest lines; with several it lists their line numbers. Blocks of one file and files of one patch apply all or nothing. If the text is not found as written, acus also accepts it with `acus show` line-number prefixes stripped, or ignoring trailing whitespace, and prints a `note:`.
+- The skill, the README and `acus patch --help` teach SEARCH/REPLACE as the one way to edit text; `*** Replace All:` is unchanged.
+
+### Removed
+
+- `@@` hunks with `-`/`+`/context lines in `*** Update File:`, and the `@@ anchor` line that could narrow a block. The 0.11.0 hunk fallbacks (split hunks, partial-line matches, tolerant whitespace matching) are removed too. A patch using hunk lines fails with an error that shows the SEARCH/REPLACE form. The `*** End of File` marker is gone with them.
+
 ## [0.11.0]
 
 ### Added
