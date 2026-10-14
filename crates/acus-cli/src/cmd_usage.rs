@@ -178,11 +178,12 @@ fn guard(a: &Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         );
         return Ok(Outcome::Empty);
     }
-    let mut rules: std::collections::BTreeMap<&str, [u64; 3]> = Default::default();
+    let mut rules: std::collections::BTreeMap<&str, [u64; 4]> = Default::default();
     for e in &entries {
         let slot = match e["kind"].as_str() {
             Some("deny") => 0,
             Some("hint") => 1,
+            Some("rewrite") => 3,
             _ => 2,
         };
         rules.entry(e["rule"].as_str().unwrap_or("?")).or_default()[slot] += 1;
@@ -197,16 +198,16 @@ fn guard(a: &Args, out: &Out, cfg: &Config) -> Result<Outcome> {
         let v: Vec<_> = rules
             .iter()
             .map(
-                |(r, n)| serde_json::json!({"rule": r, "deny": n[0], "hint": n[1], "escape": n[2]}),
+                |(r, n)| serde_json::json!({"rule": r, "deny": n[0], "hint": n[1], "escape": n[2], "rewrite": n[3]}),
             )
             .collect();
         println!("{}", serde_json::json!({"rules": v, "escaped": escaped}));
         return Ok(Outcome::Found);
     }
     println!("guard: {} decisions ({})", entries.len(), path.display());
-    println!("{}", out.header("rule deny hint escape"));
+    println!("{}", out.header("rule deny hint escape rewrite"));
     for (r, n) in &rules {
-        println!("  {r} {} {} {}", n[0], n[1], n[2]);
+        println!("  {r} {} {} {} {}", n[0], n[1], n[2], n[3]);
     }
     if !escaped.is_empty() {
         println!("{}", out.header("latest escaped calls"));

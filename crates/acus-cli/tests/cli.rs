@@ -527,10 +527,43 @@ fn guard_answers_hook_calls() {
         "tool_name": "Bash",
         "tool_input": {"command": "cd app && ls; cat settings.json; grep -n foo src/a.rs | head"},
     }));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert_eq!(o["permissionDecision"], "allow", "{out}");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "cd app && ls; cat settings.json; acus find 'foo' 'src/a.rs' | head",
+        "{out}"
+    );
+    assert!(o.get("permissionDecisionReason").is_none(), "{out}");
+    assert!(
+        o["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("instead of `grep -n foo src/a.rs`"),
+        "{out}"
+    );
+    // Other tool_input fields survive; a build pipe is rewritten in every mode, with no decision.
+    let build = serde_json::json!({
+        "tool_name": "Bash",
+        "permission_mode": "default",
+        "tool_input": {"command": "cargo test 2>&1 | tail -3", "timeout": 5000},
+    });
+    let v: serde_json::Value = serde_json::from_str(&guard(build)).unwrap();
+    let o = &v["hookSpecificOutput"];
+    assert!(o.get("permissionDecision").is_none(), "{v}");
+    assert_eq!(
+        o["updatedInput"]["command"],
+        "acus ctx 'cargo test' --tail 3"
+    );
+    assert_eq!(o["updatedInput"]["timeout"], 5000);
+    // In-place edits have no exact rewrite.
+    let out = guard(serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd app && cat a.rs; sed -i 's/a/b/' b.rs"},
+    }));
     assert!(out.contains(r#""permissionDecision":"deny""#), "{out}");
     assert!(out.contains("Nothing ran"), "{out}");
-    assert!(out.contains("`grep -n foo src/a.rs`"), "{out}");
-    assert!(out.contains("`acus find 'foo' 'src/a.rs'`"), "{out}");
 }
 
 #[test]

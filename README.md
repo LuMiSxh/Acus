@@ -84,7 +84,9 @@ That adds:
 
 The SessionStart hook prints the skill at every start, `/clear` and compaction. There is deliberately no project map in it: [overviews in context files did not help agents find the relevant files and raised cost](https://arxiv.org/abs/2602.11988). Agents call `acus map` when they need the layout instead.
 
-`acus guard` refuses what acus does better and names the acus command to use:
+`acus guard` rewrites what acus does better into the acus call when it can, and otherwise refuses and names the acus command to use:
+
+- Rewrites (Claude Code, Bash): when every offending segment has an exact replacement, the hook answers `allow` with `updatedInput` carrying the rewritten command, so the call costs no extra turn. `cat FILE`, `head -n N FILE` and `sed -n A,Bp FILE` become `acus show`, `grep`/`rg` searches become `acus find`, and `cargo test | tail -N` or `| grep RE` become `acus ctx '…' --tail N` / `--grep RE`, in compound commands too (`cd x && cat a.rs`). Builds and tests are rewritten in every permission mode too, but without a `permissionDecision`, so Claude Code's normal permission flow decides on the rewritten command. The agent's context names what ran instead of what. One segment without an exact replacement (`tail -N FILE`, `head FILE`, `cat -n`, wildcards, redirects, `sed -i`) refuses the whole command. Codex hooks cannot rewrite and always refuse.
 
 - Bash: `grep`/`rg` searches, `cat`/`head`/`tail`/`sed -n` reads of source files, `sed -i`/`perl -i` edits, and builds or tests piped into `tail`/`head`/`grep` (`cargo test | tail` hides failures and leads to reruns). Pipe filters on other output (`git log | grep fix`), `grep` of stdin, logs, text and other plain files, reads and searches of JSON, TOML and YAML data files, `cat a.rs >> all.txt` copies and heredoc bodies pass. Python, Node and Ruby scripts that rewrite a source file with `.replace()` or `re.sub()` still run, with a hint to use `acus patch`, because telling them apart from data processing is a heuristic.
 - A refusal stops the whole command, so nothing in it runs. For a compound command (`cd x && ls; cat a.rs`) the reason names the refused segment, says that no part ran and shows the acus command to run in its place, so the retry is one step.
@@ -94,7 +96,7 @@ The SessionStart hook prints the skill at every start, `/clear` and compaction. 
 - Recursive listings (`tree`, `ls -R`, `find` without filters, `Get-ChildItem -Recurse`) run, with a hint at `acus map`.
 - Plain `git status`, `git diff`, `git log` and `git show` run, with a hint at `acus diff` or `acus log`. Output already compacted by a flag (`--short`, `--stat`, `--name-only`, `--oneline`, `--format`) and `git show REV:path` pass without a hint.
 
-A refused shell command can run anyway with a `command ` prefix (Bash) or a trailing `# acus-skip` comment (both shells). Every decision, escapes included, is logged next to the config file; `acus usage --guard` counts them per rule and lists the escaped calls, which point at refusals acus could not replace. `|| true` lets every call through when acus is missing or `guard` is disabled in the configuration. Hooks apply to subagents too, and on Windows Claude Code runs them with Git Bash.
+A refused shell command can run anyway with a `command ` prefix (Bash) or a trailing `# acus-skip` comment (both shells). Every decision, escapes included, is logged next to the config file; `acus usage --guard` counts rewrites, refusals, hints and escapes per rule and lists the escaped calls, which point at refusals acus could not replace. `|| true` lets every call through when acus is missing or `guard` is disabled in the configuration. Hooks apply to subagents too, and on Windows Claude Code runs them with Git Bash.
 
 Subagents do not see SessionStart output. Preload the skill in each custom agent's frontmatter, and give read-only agents `Bash` so they can run it:
 
